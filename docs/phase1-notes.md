@@ -11,6 +11,22 @@ Decisions and constraints to carry into the remaining Phase 1 tasks.
   which we poll for odds anyway. That avoids a paid tier. Resolve team names through
   `participant_alias` as usual.
 
+## P1.1-7 Live odds (The Odds API) - notes for when it is built
+
+- Billing: each `/odds` call costs `markets x regions` credits; `/events` and `/sports` are free.
+  Pinnacle is only in the `eu` region, so `uk,eu` x `h2h,totals` = 4 credits per league per poll.
+  Use `bookmakers=pinnacle,betfair_ex_uk,...` instead (every 10 books bill as one region): 2 credits.
+  Check which of our UK books the API actually carries before relying on any of them.
+- Budget: 500 credits/month over 8 leagues at 2 credits is ~31 polls per league per month. Poll each
+  league only on matchdays, once ~T-24h and once ~T-3h (the news re-score), plus a closing grab at
+  kickoff; skip leagues with no fixture in the window (from the free `/events` call).
+- Log `x-requests-remaining` and `x-requests-used` from every response into `ingestion_run`, refuse
+  to poll when the projected month-end spend exceeds `monthly_credit_budget`, and alert (Phase 2
+  Telegram) at 80%.
+- Cache every response body on disk before parsing, as the football-data.co.uk source does.
+- Live snapshots carry a real `ts` (the API's `last_update`), so `ts_estimated = false` and the
+  tracker's execution edge stops depending on the kickoff-2h estimate.
+
 ## P1.2 Model (done)
 
 - Cold start: `pooled` (top and second tier fitted together per country, each team shrunk

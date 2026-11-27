@@ -45,6 +45,10 @@ request_delay_seconds = 2.0    # be polite: one request every 2s at most
 cache_dir = "data/raw/football_data_co_uk"
 
 [ingest.the_odds_api]            # Phase 1 task P1.1-7 (not built yet)
+# Cost per /odds call = markets x regions credits; /events and /sports are free. Pinnacle is in the
+# "eu" region, not "uk", so regions="uk,eu" would cost 4 credits per league per poll. Passing
+# `bookmakers=` instead bills each group of 10 books as one region: our 7 books -> 2 credits.
+# The poller sends `bookmakers` (built from bookmakers.yaml) and ignores `regions` when it does.
 regions = "uk"
 markets = "h2h,totals"
 monthly_credit_budget = 500     # free tier; the poller must stay under this

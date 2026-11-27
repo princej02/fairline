@@ -28,8 +28,8 @@ export default function TrackerPage() {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-end justify-between">
-        <div>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="max-w-3xl">
           <h1 className="text-xl font-semibold">Tracker</h1>
           <p className="text-sm text-muted">
             Does the backtest&apos;s +2.3% soft-book CLV survive live execution? Each bet is checked against the sharp price at
@@ -91,14 +91,35 @@ export default function TrackerPage() {
   );
 }
 
+/** Whole-bet numbers. For an acca, multiply the legs exactly as /api/tracker/summary does:
+ * p = Π p_leg, edge = Π effective_price × p − 1. Null unless every leg has the price. */
+function combined(b: Bet) {
+  const prod = (xs: (number | null)[]) => (xs.some((x) => x === null) ? null : xs.reduce<number>((a, x) => a * (x as number), 1));
+  const price = prod(b.legs.map((l) => l.effective_price ?? l.price));
+  const ref = prod(b.legs.map((l) => l.ref_fair_prob));
+  const close = prod(b.legs.map((l) => l.close_fair_prob));
+  const refBooks = [...new Set(b.legs.map((l) => l.ref_book).filter(Boolean))] as string[];
+  return {
+    ref,
+    close,
+    refBook: refBooks.length === 1 ? refBooks[0] : null,
+    edge: price !== null && ref !== null ? price * ref - 1 : null,
+    clv: price !== null && close !== null ? price * close - 1 : null,
+  };
+}
+
+const signTone = (v: number | null) => (v === null ? "text-muted" : v < 0 ? "text-neg" : "text-pos");
+
 function BetRow({ b, cur, onVoid }: { b: Bet; cur: string; onVoid: () => void }) {
   const leg = b.legs[0];
   const multi = b.legs.length > 1;
+  const c = combined(b);
   const tone = b.status === "won" ? "pos" : b.status === "lost" ? "neg" : "muted";
+  const meta = [b.strategy, b.source === "manual" ? "manual" : null].filter(Boolean).join(" · ");
   return (
     <tr className="border-t border-line align-top">
-      <td className="num px-2 py-2 text-xs text-muted">{new Date(b.placed_at).toLocaleString("en-GB", { dateStyle: "short", timeStyle: "short" })}</td>
-      <td className="px-2 py-2">
+      <td className="num whitespace-nowrap px-2 py-2 text-xs text-muted">{new Date(b.placed_at).toLocaleString("en-GB", { dateStyle: "short", timeStyle: "short" })}</td>
+      <td className="min-w-56 px-2 py-2">
         {b.legs.map((l) => (
           <div key={l.leg_no}>
             <Link href={`/events/${l.event_id}`} className="hover:text-ref">{l.label}</Link>{" "}
@@ -106,17 +127,27 @@ function BetRow({ b, cur, onVoid }: { b: Bet; cur: string; onVoid: () => void })
           </div>
         ))}
         {multi && <Badge tone="accent">{b.legs.length}-leg acca</Badge>}
+        {meta && <div className="text-xs text-muted">{meta}</div>}
+        {b.notes && <div className="max-w-72 truncate text-xs text-muted" title={b.notes}>{b.notes}</div>}
       </td>
-      <td className="px-2 py-2">{book(b.bookmaker)}</td>
-      <td className="num px-2 py-2">{odds(b.price)}{leg.effective_price && leg.effective_price !== leg.price && <div className="text-xs text-muted">{odds(leg.effective_price)} net</div>}</td>
+      <td className="whitespace-nowrap px-2 py-2">{book(b.bookmaker)}</td>
+      <td className="num px-2 py-2">{odds(b.price)}{!multi && leg.effective_price && leg.effective_price !== leg.price && <div className="text-xs text-muted">{odds(leg.effective_price)} net</div>}</td>
       <td className="num px-2 py-2">{money(b.stake, cur)}</td>
-      <td className="num px-2 py-2 text-ref">{multi ? "—" : pct(leg.ref_fair_prob)}<div className="text-xs text-muted">{book(leg.ref_book)}</div></td>
-      <td className={`num px-2 py-2 ${(leg.execution_edge ?? 0) < 0 ? "text-neg" : "text-pos"}`}>
-        {multi ? "—" : signedPct(leg.execution_edge)}
-        {!multi && leg.execution_edge !== null && leg.execution_edge < 0 && <div><Badge tone="warn">stale / no edge</Badge></div>}
+      <td className="num px-2 py-2 text-ref">
+        {c.ref === null ? (
+          <span className="text-xs text-muted" title="No sharp price was recorded before this bet was placed (no lookahead), so execution edge can't be measured.">
+            none before placement
+          </span>
+        ) : (
+          <>{pct(c.ref)}<div className="text-xs text-muted">{book(c.refBook)}</div></>
+        )}
       </td>
-      <td className="num px-2 py-2 text-ref">{multi ? "—" : pct(leg.close_fair_prob)}</td>
-      <td className={`num px-2 py-2 font-medium ${(leg.clv ?? 0) < 0 ? "text-neg" : "text-pos"}`}>{multi ? "—" : leg.clv === null ? <span className="text-muted">pending</span> : signedPct(leg.clv)}</td>
+      <td className={`num px-2 py-2 ${signTone(c.edge)}`}>
+        {c.edge === null ? "—" : signedPct(c.edge)}
+        {c.edge !== null && c.edge < 0 && <div><Badge tone="warn">stale / no edge</Badge></div>}
+      </td>
+      <td className="num px-2 py-2 text-ref">{c.close === null ? <span className="text-muted">—</span> : pct(c.close)}</td>
+      <td className={`num px-2 py-2 font-medium ${signTone(c.clv)}`}>{c.clv === null ? <span className="text-muted">pending</span> : signedPct(c.clv)}</td>
       <td className="px-2 py-2"><Badge tone={tone}>{b.status}</Badge>{b.pnl !== null && <div className="num text-xs text-muted">{money(b.pnl, cur)}</div>}</td>
       <td className="px-2 py-2 text-right">{b.status === "open" && <button onClick={onVoid} className="text-xs text-muted hover:text-neg">void</button>}</td>
     </tr>

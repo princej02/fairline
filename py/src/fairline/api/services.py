@@ -46,7 +46,11 @@ DEFAULT_STRATEGY = "model_beats_ref"
 _STRATS = {s.name: s for s in STRATEGIES}
 
 _band_cache: dict[tuple[str, str], dict] = {}
-_band_lock = threading.Lock()
+# One PyMC run at a time across the process: it already uses every core (4 chains), and a second
+# request for the same slate must wait for the first rather than start a duplicate sampler.
+# The /api/board route is a sync `def`, so FastAPI runs it in the threadpool and the wait never
+# blocks the event loop.
+_sampler_lock = threading.Lock()
 
 
 def settings_out(config: Config) -> S.SettingsOut:
@@ -87,9 +91,17 @@ def _bands(conn, config: Config, pool: str, day: str, event_ids: list[int]) -> d
     """PyMC bands for one slate (~5-10 s), cached in-process. as_of = the matchday's midnight UTC,
     which is before every decision time on that day."""
     key = (pool, day)
-    with _band_lock:
-        if key in _band_cache:
-            return _band_cache[key]
+    if (hit := _band_cache.get(key)) is not None:
+        return hit
+    with _sampler_lock:
+        if (hit := _band_cache.get(key)) is not None:  # filled while we waited
+            return hit
+        out = _sample_bands(conn, config, pool, day, event_ids)
+        _band_cache[key] = out
+        return out
+
+
+def _sample_bands(conn, config: Config, pool: str, day: str, event_ids: list[int]) -> dict:
     from fairline.models.football.bayes import fit_and_predict
     from fairline.models.football.data import load_matches
 
@@ -111,8 +123,6 @@ def _bands(conn, config: Config, pool: str, day: str, event_ids: list[int]) -> d
             (x["event_id"], x["market"], x["line"], x["selection"]): x for x in r.predictions.iter_rows(named=True)
         },
     }
-    with _band_lock:
-        _band_cache[key] = out
     return out
 
 
