@@ -6,11 +6,32 @@ kelly_fraction = 0.25          # fractional Kelly multiplier
 max_stake_pct = 0.02           # hard cap per bet, as a fraction of bankroll
 min_ev = 0.03                  # hide edges below +3% EV on the board
 max_odds = 6.0                 # hide prices above this by default (model least reliable)
-devig_method = "power"         # multiplicative | power | shin
-# Sharp "true price" references, in priority order. Pinnacle closing is primary;
+devig_method = "power"         # multiplicative | additive | power | shin
+# Sharp "true price" references, in priority order. Pinnacle is primary;
 # Betfair Exchange is the fallback where Pinnacle is missing.
 reference_books = ["pinnacle", "betfair_ex_uk"]
-betfair_commission = 0.05      # set to your actual Betfair rate; applied before comparing prices
+# Books you can actually bet with (Pinnacle is reference-only: it doesn't take UK customers).
+bettable_books = ["bet365", "skybet", "williamhill", "paddypower", "betfair_ex_uk"]
+# Applied to Betfair prices whenever Betfair is where you would bet (EV, Kelly):
+# effective odds = 1 + (O - 1) * (1 - c). Not applied when Betfair is only the *reference*:
+# commission changes what you are paid, not the probability the price implies.
+betfair_commission = 0.05      # set to your actual Betfair rate
+
+# Exposure. Stakes are capped per bet, then per match (all markets on one match are
+# correlated), then per slate (bets open at the same time). When a cap binds, every stake
+# in that group is scaled down proportionally; none are dropped.
+max_match_exposure_pct = 0.02
+max_slate_exposure_pct = 0.10
+
+# Board defaults
+one_per_match = true           # show only the highest-EV selection per match by default
+disagreement_warn = 0.10       # flag when |model p - sharp fair p| exceeds this (likely model miss)
+conservative_quantile = 0.25   # "conservative EV" uses this posterior quantile of p when bands exist
+
+# Accas. max_odds above applies to each leg (it is about model reliability per selection);
+# the combined price has its own cap.
+acca_max_legs = 4
+acca_max_combined_odds = 20.0
 
 [markets]
 enabled = ["1X2", "OU_2.5"]    # Phase 1. Next: AH, then BTTS.
@@ -40,3 +61,37 @@ llm_model = "claude-haiku-5-5"
 
 [alerts]                         # Phase 2
 channel = "telegram"
+
+[models.dixon_coles]
+max_goals = 10                  # score grid is 0..max_goals per side (>= 10 enforced), renormalised
+half_life_days = 180            # time-decay weight: 0.5 ** (age_days / half_life_days)
+max_history_days = 1460         # ignore matches older than this (weights are ~0 anyway)
+prior_sd = 0.6                  # Gaussian prior (ridge) on attack/defence; also fixes identifiability
+rho_bounds = [-0.3, 0.3]
+result_delay_hours = 2          # a result is "known" only from kickoff + this; anti-leakage
+# Cold start for promoted teams:
+#   pooled: fit top + second tier jointly per country, so a promoted club arrives with
+#           ratings learned from its second-tier matches (scale linked through teams that move).
+#   prior:  fit each competition alone; teams without history get the prior below.
+# In both modes a team with too little weighted history falls back to the prior.
+cold_start = "pooled"
+min_effective_matches = 4.0     # sum of decay weights below this => use the cold-start prior
+promoted_prior_quantile = 0.25  # prior = this quantile of attack/defence in the team's division
+
+[models.dixon_coles.pools]      # country pools for the pooled fit; first entry is the top tier
+ENG = ["ENG1", "ENG2"]
+ESP = ["ESP1", "ESP2"]
+GER = ["GER1", "GER2"]
+FRA = ["FRA1", "FRA2"]
+
+[models.walkforward]
+burn_in_days = 365              # first predictions start this long after the earliest data
+retrain_every_days = 7
+
+[models.bayes]                  # PyMC: live-slate uncertainty bands only, never the backtest loop
+history_days = 730
+draws = 1000
+tune = 1000
+chains = 4
+interval = 0.90                 # prob_lo / prob_hi = central 90% credible interval
+target_accept = 0.90            # NUTS step-size target; 0.95 tested, no fewer divergences

@@ -61,9 +61,17 @@ class EdgeSettings(BaseModel):
     max_stake_pct: float = Field(gt=0, le=1)
     min_ev: float
     max_odds: float = Field(gt=1)
-    devig_method: Literal["multiplicative", "power", "shin"]
+    devig_method: Literal["multiplicative", "additive", "power", "shin"]
     reference_books: list[str]
+    bettable_books: list[str]
     betfair_commission: float = Field(ge=0, lt=1)
+    max_match_exposure_pct: float = Field(gt=0, le=1)
+    max_slate_exposure_pct: float = Field(gt=0, le=1)
+    one_per_match: bool
+    disagreement_warn: float = Field(gt=0, lt=1)
+    conservative_quantile: float = Field(gt=0, lt=0.5)
+    acca_max_legs: int = Field(ge=2)
+    acca_max_combined_odds: float = Field(gt=1)
 
 
 class FootballDataCoUkSettings(BaseModel):
@@ -75,12 +83,46 @@ class FootballDataCoUkSettings(BaseModel):
     cache_dir: str
 
 
+class DixonColesSettings(BaseModel):
+    max_goals: int = Field(ge=10, description="grid must cover at least 0-10 goals per side")
+    half_life_days: float = Field(gt=0)
+    max_history_days: int = Field(gt=0)
+    prior_sd: float = Field(gt=0)
+    rho_bounds: tuple[float, float]
+    result_delay_hours: float = Field(ge=0)
+    cold_start: Literal["pooled", "prior"]
+    min_effective_matches: float = Field(ge=0)
+    promoted_prior_quantile: float = Field(gt=0, lt=1)
+    pools: dict[str, list[str]]
+
+
+class WalkForwardSettings(BaseModel):
+    burn_in_days: int = Field(ge=0)
+    retrain_every_days: int = Field(gt=0)
+
+
+class BayesSettings(BaseModel):
+    history_days: int = Field(gt=0)
+    draws: int = Field(gt=0)
+    tune: int = Field(gt=0)
+    chains: int = Field(gt=0)
+    interval: float = Field(gt=0, lt=1)
+    target_accept: float = Field(gt=0.5, lt=1)
+
+
+class ModelSettings(BaseModel):
+    dixon_coles: DixonColesSettings
+    walkforward: WalkForwardSettings
+    bayes: BayesSettings
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     edge: EdgeSettings
     markets: dict[str, Any]
     ingest: dict[str, Any]
+    models: ModelSettings
 
     @property
     def fdcuk(self) -> FootballDataCoUkSettings:
@@ -139,9 +181,13 @@ def load_config(root: Path | None = None) -> Config:
     books_raw = yaml.safe_load((cfg_dir / "bookmakers.yaml").read_text())
     bookmakers = {b["code"]: Bookmaker(**b) for b in books_raw["bookmakers"]}
 
-    unknown = set(settings.edge.reference_books) - bookmakers.keys()
+    unknown = (set(settings.edge.reference_books) | set(settings.edge.bettable_books)) - bookmakers.keys()
     if unknown:
-        raise ValueError(f"edge.reference_books references unknown bookmakers: {sorted(unknown)}")
+        raise ValueError(f"edge reference/bettable books reference unknown bookmakers: {sorted(unknown)}")
+    for pool, codes in settings.models.dixon_coles.pools.items():
+        bad = [c for c in codes if c not in competitions]
+        if bad:
+            raise ValueError(f"models.dixon_coles.pools.{pool} references non-allowlisted competitions: {bad}")
 
     return Config(root=root, settings=settings, competitions=competitions, bookmakers=bookmakers)
 

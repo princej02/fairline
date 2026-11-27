@@ -62,4 +62,23 @@ def fdcuk_current_season_daily(context: ScheduleEvaluationContext):
         yield RunRequest(run_key=f"{key}:{context.scheduled_execution_time:%Y-%m-%d}", partition_key=key)
 
 
-defs = Definitions(assets=[fdcuk_season], jobs=[fdcuk_job], schedules=[fdcuk_current_season_daily])
+# ---------------------------------------------------------------- models (P1.2)
+from fairline.models.football.run import run_walkforward  # noqa: E402
+
+POOLS = list(_cfg.settings.models.dixon_coles.pools)
+pool_partitions = StaticPartitionsDefinition(POOLS)
+
+
+@asset(partitions_def=pool_partitions, group_name="models", compute_kind="python", deps=[fdcuk_season])
+def dixon_coles_walkforward(context: AssetExecutionContext) -> MaterializeResult:
+    """Weekly-refit walk-forward Dixon-Coles MLE for one country pool; persists versions + predictions."""
+    with db.connect() as conn:
+        out = run_walkforward(conn, get_config(), context.partition_key, persist=True)
+    return MaterializeResult(metadata=out)
+
+
+defs = Definitions(
+    assets=[fdcuk_season, dixon_coles_walkforward],
+    jobs=[fdcuk_job],
+    schedules=[fdcuk_current_season_daily],
+)
