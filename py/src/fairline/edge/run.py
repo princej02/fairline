@@ -15,7 +15,7 @@ def run_board(conn: psycopg.Connection, config: Config, pool: str, day: str, off
     s = st.edge
     comps = st.models.dixon_coles.pools[pool]
     events = matchday_events(conn, comps, day, offset_hours)
-    books = sorted(set(s.reference_books) | set(s.bettable_books))
+    books = s.live_quote_books()
     probs, quotes = load_inputs(conn, events, books, MODEL_NAME, config_hash(st.models.dixon_coles))
     exchanges = {b.code for b in config.bookmakers.values() if b.kind == "exchange"}
     return build_board(events, probs, quotes, s, exchanges)

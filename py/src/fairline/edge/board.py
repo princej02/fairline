@@ -31,7 +31,14 @@ from datetime import datetime
 import polars as pl
 
 from fairline.core.config import EdgeSettings
-from fairline.edge.devig import IncompleteMarket, Quote, Snapshot, conservative, devig, exchange_effective_odds
+from fairline.edge.devig import (
+    IncompleteMarket,
+    Quote,
+    Snapshot,
+    conservative,
+    exchange_effective_odds,
+    reference_fair,
+)
 from fairline.edge.kelly import binary_outcome, full_kelly, size
 
 
@@ -155,16 +162,22 @@ def evaluate(
             skipped[k] += v
 
         ref_book, ref_p, ref_cons, ref_flags = None, None, None, []
-        for book in s.reference_books:
-            snap = snaps.get(book)
-            if snap is None:
+        for parent in s.reference_books:
+            # a reference and its derived twin (pinnacle / pinnacle_derived) are one source: use the
+            # fresher snapshot; on a tie the quoted one wins
+            options = [(b, snaps[b]) for b in (parent, s.derived_references.get(parent)) if b in snaps]
+            if not options:
                 continue
-            fp = devig(snap, s.devig_method)
+            book, snap = max(options, key=lambda o: o[1].ts)
+            is_derived = book != parent
+            fp = reference_fair(snap, s.devig_method, derived=is_derived)
             if fp.status != "ok":
                 ref_flags.append(f"ref_{book}_{fp.status}")
                 skipped[f"ref_{fp.status}"] += 1
                 continue
-            ref_book, ref_p, ref_cons = book, fp.probs, conservative(snap)
+            ref_book, ref_p, ref_cons = book, fp.probs, (fp.probs if is_derived else conservative(snap))
+            if is_derived:
+                ref_flags.append("ref_derived")
             break
         if ref_book is None:
             ref_flags.append("no_reference")

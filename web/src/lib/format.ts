@@ -16,7 +16,7 @@ export const selectionLabel = (market: string, selection: string, line: number |
   market === "1X2" ? { home: "Home", draw: "Draw", away: "Away" }[selection] ?? selection : `${selection === "over" ? "Over" : "Under"} ${line ?? ""}`.trim();
 
 export const book = (code: string | null | undefined) =>
-  ({ pinnacle: "Pinnacle", betfair_ex_uk: "Betfair Ex", bet365: "Bet365", skybet: "Sky Bet", williamhill: "William Hill", paddypower: "Paddy Power" })[code ?? ""] ?? code ?? "—";
+  ({ pinnacle: "Pinnacle", pinnacle_derived: "Pinnacle (derived)", betfair_ex_uk: "Betfair Ex", bet365: "Bet365", skybet: "Sky Bet", williamhill: "William Hill", paddypower: "Paddy Power" })[code ?? ""] ?? code ?? "—";
 
 export const evTone = (v: number | null | undefined) =>
   v === null || v === undefined ? "text-muted" : v >= 0 ? "text-pos" : "text-neg";

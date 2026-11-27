@@ -48,6 +48,7 @@ export interface BoardRow {
   p_model: number;
   p_ref: number | null;
   ref_book: string | null;
+  ref_note: string | null; // e.g. "derived from 3.0 (draw fit +0.4%)": computed, not quoted
   p_bet: number;
   ev_strategy: number;
   ev_model: number;
@@ -169,6 +170,9 @@ export interface BetLeg {
   close_fair_prob: number | null;
   clv: number | null;
   result: string | null;
+  ref_source_line: number | null; // placement reference derived from this line (null = quoted)
+  close_source_line: number | null;
+  clv_note: string | null; // why CLV is empty: no like-for-like close
 }
 
 export interface Bet {

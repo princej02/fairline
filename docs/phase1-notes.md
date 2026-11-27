@@ -96,6 +96,27 @@ Add the second tiers, or pay for a bigger tier, only after live CLV holds up in 
     event the poller created instead of duplicating it.
 - **Secrets.** httpx request logging is silenced, since it prints the URL and so the `apiKey`.
   Errors are rebuilt without the URL, and cache metadata omits the key. Tests check all three.
+- **Derived O/U 2.5 reference.**
+  - *The gap.* On the first live poll, Pinnacle quoted only its main totals line, which was 2.5 for
+    just 11 of 78 matches (otherwise 2.75/3.0/3.25...). William Hill quoted 2.5 everywhere. Sky Bet,
+    Paddy Power and Betfair returned no totals at all.
+  - *Derivation* (`models/football/implied.py`): fit a Dixon-Coles matrix to Pinnacle's devigged
+    1X2 and devigged main line. An outer brentq on total goals matches the Asian-settled effective
+    probability of Over; an inner brentq keeps the home/away split on the 1X2 ratio; rho is the
+    league's latest fit. The round trip from known lambdas is exact.
+  - *Storage.* Results go to the `pinnacle_derived` pseudo-bookmaker (kind `derived`), and
+    `odds_derivation` records the source line, prices, lambdas, rho and the draw-fit error. The
+    board shows "derived from 3.0". A quoted 2.5 in the same poll always wins.
+  - *What rho really does* (measured):
+    - tau only moves mass among 0-0, 1-0, 0-1 and 1-1, all totals <= 2, and preserves it. So for
+      main lines >= 2.75 the derived 2.5 equals a plain-Poisson fit exactly.
+    - It changes the answer only for main lines <= 2.25, by 0.2-0.3pp (0.5-0.8% of the price).
+    - The home/away anchoring matters only through tau, since a sum of independent Poissons depends
+      on the total alone.
+  - *Like-for-like CLV.* A quoted placement reference only compares with a quoted close; a derived
+    one only with a close derived from the same source line. Anything else leaves CLV empty with a
+    `clv_note`, so a 0.5-1% line-translation residual cannot pass for CLV. The backtester never
+    loads derived books; historical Pinnacle O/U is always quoted.
 - **Not done here.**
   - Live predictions for upcoming fixtures (the model only scores past matchdays so far), and so a
     live board.

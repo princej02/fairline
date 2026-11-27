@@ -99,12 +99,16 @@ function combined(b: Bet) {
   const ref = prod(b.legs.map((l) => l.ref_fair_prob));
   const close = prod(b.legs.map((l) => l.close_fair_prob));
   const refBooks = [...new Set(b.legs.map((l) => l.ref_book).filter(Boolean))] as string[];
+  const derivedFrom = b.legs.length === 1 ? b.legs[0].ref_source_line : null;
+  const clvNote = b.legs.map((l) => l.clv_note).find(Boolean) ?? null;
   return {
     ref,
     close,
     refBook: refBooks.length === 1 ? refBooks[0] : null,
     edge: price !== null && ref !== null ? price * ref - 1 : null,
     clv: price !== null && close !== null ? price * close - 1 : null,
+    derivedFrom,
+    clvNote,
   };
 }
 
@@ -139,7 +143,11 @@ function BetRow({ b, cur, onVoid }: { b: Bet; cur: string; onVoid: () => void })
             none before placement
           </span>
         ) : (
-          <>{pct(c.ref)}<div className="text-xs text-muted">{book(c.refBook)}</div></>
+          <>
+            {pct(c.ref)}
+            <div className="text-xs text-muted">{book(c.refBook)}</div>
+            {c.derivedFrom !== null && <div className="text-xs text-warn">derived from {c.derivedFrom}</div>}
+          </>
         )}
       </td>
       <td className={`num px-2 py-2 ${signTone(c.edge)}`}>
@@ -147,7 +155,7 @@ function BetRow({ b, cur, onVoid }: { b: Bet; cur: string; onVoid: () => void })
         {c.edge !== null && c.edge < 0 && <div><Badge tone="warn">stale / no edge</Badge></div>}
       </td>
       <td className="num px-2 py-2 text-ref">{c.close === null ? <span className="text-muted">—</span> : pct(c.close)}</td>
-      <td className={`num px-2 py-2 font-medium ${signTone(c.clv)}`}>{c.clv === null ? <span className="text-muted">pending</span> : signedPct(c.clv)}</td>
+      <td className={`num px-2 py-2 font-medium ${signTone(c.clv)}`}>{c.clv !== null ? signedPct(c.clv) : c.clvNote ? <span className="text-xs text-muted" title={c.clvNote}>n/a: no like-for-like close</span> : <span className="text-muted">pending</span>}</td>
       <td className="px-2 py-2"><Badge tone={tone}>{b.status}</Badge>{b.pnl !== null && <div className="num text-xs text-muted">{money(b.pnl, cur)}</div>}</td>
       <td className="px-2 py-2 text-right">{b.status === "open" && <button onClick={onVoid} className="text-xs text-muted hover:text-neg">void</button>}</td>
     </tr>
