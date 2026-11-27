@@ -12,6 +12,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import psycopg
 
@@ -71,6 +72,7 @@ def last_polls(conn: psycopg.Connection, sports: list[str]) -> dict[str, datetim
 def _insert_snapshots(conn, sport_id: int, rows: list[dict]) -> int:
     if not rows:
         return 0
+    conn.execute("DROP TABLE IF EXISTS _live_in")  # ON COMMIT DROP does not fire inside an outer transaction
     conn.execute(
         """
         CREATE TEMP TABLE _live_in (
@@ -258,6 +260,51 @@ def sync_all(
             out.append(SyncResult(c, error=str(e)))
             continue
         out.append(sync_fixtures(conn, config, c, data, now))
+    return out
+
+
+# ---------------------------------------------------------------------- replay (free)
+def rederive_from_cache(conn: psycopg.Connection, config: Config, files: list[Path]) -> dict:
+    """Re-run the O/U derivation over cached /odds responses (no API call, no credits). Each derived
+    snapshot keeps the source prices' own last_update ts (capped at that poll's fetch time), so a
+    replay never makes a price look observable earlier than it was. Idempotent."""
+    pair = D.config_for(config)
+    if not pair:
+        return {"files": 0}
+    books = config.provider_books(PROVIDER)
+    rev = {v: k for k, v in books.items()}
+    sport_id = conn.execute("SELECT id FROM sport WHERE code = 'football'").fetchone()[0]
+    s = config.settings.odds_api
+    out = {"files": 0, "derived": 0, "inserted": 0, "skipped": {}}
+    by_sport = {config.competition(c).provider_code(PROVIDER): c for c in s.competitions}
+    for f in files:
+        meta = json.loads(f.with_name(f.name.replace(".json", ".meta.json")).read_text())
+        sport = f.parent.parent.name
+        comp = by_sport.get(sport)
+        if comp is None:
+            continue
+        parsed = parse_odds(
+            json.loads(f.read_bytes()), rev, ou_lines(config), datetime.fromisoformat(meta["fetched_at"]), pair[0]
+        )
+        ext_to_event = dict(
+            conn.execute(
+                "SELECT external_id, event_id FROM event_external_id WHERE provider = %s AND external_id = ANY(%s)",
+                (PROVIDER, [e.external_id for e in parsed.events]),
+            ).fetchall()
+        )
+        rho = D.latest_rho(conn, comp, s.derived_rho_default)
+        with conn.transaction():
+            for target in sorted(ou_lines(config)):
+                d = D.derive_totals(
+                    parsed, ext_to_event, pair[0], pair[1], target, rho, config.settings.edge.devig_method
+                )
+                D.store_records(conn, sport_id, pair[1], pair[0], target, d.records)
+                out["inserted"] += _insert_snapshots(conn, sport_id, d.rows)
+                out["derived"] += len(d.records)
+                for k, v in d.skipped.items():
+                    out["skipped"][k] = out["skipped"].get(k, 0) + v
+        conn.commit()
+        out["files"] += 1
     return out
 
 

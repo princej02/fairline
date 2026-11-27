@@ -134,3 +134,19 @@ def test_derive_close_and_like_for_like_clv(env):
     ref_b, cbook_b, _, clv_b, note_b = rows[bet_b]
     assert ref_b == 2.75 and cbook_b is None and clv_b is None
     assert note_b == "no like-for-like close: placed against derived from 2.75, close is quoted"
+
+
+def test_replay_from_cache_restores_derived_baselines(env):
+    conn, api, client = env
+    from fairline.ingest.the_odds_api.poll import rederive_from_cache
+
+    n = conn.execute("SELECT count(*) FROM odds_derivation WHERE NOT is_closing").fetchone()[0]
+    conn.execute("DELETE FROM odds_derivation WHERE NOT is_closing")
+    conn.execute(
+        "DELETE FROM odds_snapshot o USING bookmaker b WHERE b.id = o.bookmaker_id AND b.code = 'pinnacle_derived' AND NOT o.is_closing"
+    )
+    conn.commit()
+    files = sorted(client.cache_dir.glob("*/*/*_odds.json"))
+    out = rederive_from_cache(conn, CFG, files)
+    assert out["derived"] == n and out["inserted"] == 2 * n  # over + under per derivation
+    assert rederive_from_cache(conn, CFG, files)["inserted"] == 0  # idempotent

@@ -14,15 +14,23 @@ from fairline.models.football.walkforward import walk_forward
 
 
 def run_walkforward(
-    conn: psycopg.Connection, config: Config, pool: str, cold_start: str | None = None, persist: bool = False
+    conn: psycopg.Connection,
+    config: Config,
+    pool: str,
+    cold_start: str | None = None,
+    persist: bool = False,
+    until: datetime | None = None,
 ) -> dict:
+    """Walk forward up to `until` (default: now). The last window starts at or before `until` and
+    scores every fixture in it, including scheduled ones; nothing is fitted "as of" a future date,
+    even though the fixture list now runs to the end of the season."""
     s = config.settings.models.dixon_coles
     if cold_start:
         s = s.model_copy(update={"cold_start": cold_start})
     comps = s.pools[pool]
     matches = load_matches(conn, comps)
     t0 = time.perf_counter()
-    res = walk_forward(matches, pool, comps, s, config.settings.models.walkforward)
+    res = walk_forward(matches, pool, comps, s, config.settings.models.walkforward, end=until or datetime.now(UTC))
     out = {
         "pool": pool,
         "cold_start": s.cold_start,
