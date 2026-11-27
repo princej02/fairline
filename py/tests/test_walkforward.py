@@ -74,3 +74,27 @@ def test_pooled_mode_uses_second_tier_history(pooled):
         (pl.col("competition") == "T1") & (pl.col("as_of") == pooled.predictions["as_of"].min())
     )
     assert not first_week["home_cold_start"].any() and not first_week["away_cold_start"].any()
+
+
+def test_score_live_scores_the_horizon_from_a_fit_at_now(matches):
+    from datetime import timedelta
+
+    from fairline.models.football.walkforward import score_live
+
+    now, h = datetime(2021, 10, 15, 12, tzinfo=UTC), timedelta(hours=72)
+    unplayed = matches.with_columns(
+        [
+            pl.when(pl.col("starts_at") > now).then(None).otherwise(pl.col(c)).alias(c)
+            for c in ("home_goals", "away_goals")
+        ]
+    )
+    live = score_live(unplayed, "SIM", ["T1", "T2"], S, now, h)
+    p = live.predictions
+    assert p.height > 0 and (p["as_of"] == now).all()
+    expected = unplayed.filter((pl.col("starts_at") > now) & (pl.col("starts_at") <= now + h)).height
+    assert p.height == expected
+    # no leakage: knowing the future results changes nothing (the fit only uses what was known at now)
+    peek = score_live(matches, "SIM", ["T1", "T2"], S, now, h)
+    assert peek.predictions.height == 0  # those fixtures are already played in `matches`, so nothing to score
+    same = score_live(unplayed.vstack(matches.filter(pl.col("starts_at") > now + h)), "SIM", ["T1", "T2"], S, now, h)
+    assert same.predictions.select("event_id", "p_home").equals(p.select("event_id", "p_home"))

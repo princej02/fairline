@@ -114,6 +114,9 @@ FRA = ["FRA1", "FRA2"]
 [models.walkforward]
 burn_in_days = 365              # first predictions start this long after the earliest data
 retrain_every_days = 7
+live_horizon_hours = 72         # live scoring: one extra fit with the training cutoff at now, scoring
+                                # every fixture in the next 72h (so a Sunday game is scored before its
+                                # Saturday T-24h poll); the next morning's run supersedes it
 
 [models.bayes]                  # PyMC: live-slate uncertainty bands only, never the backtest loop
 history_days = 730

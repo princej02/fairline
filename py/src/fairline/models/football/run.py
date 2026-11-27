@@ -10,7 +10,7 @@ import psycopg
 
 from fairline.core.config import Config
 from fairline.models.football.data import load_matches
-from fairline.models.football.walkforward import walk_forward
+from fairline.models.football.walkforward import score_live, walk_forward
 
 
 def run_walkforward(
@@ -30,7 +30,9 @@ def run_walkforward(
     comps = s.pools[pool]
     matches = load_matches(conn, comps)
     t0 = time.perf_counter()
-    res = walk_forward(matches, pool, comps, s, config.settings.models.walkforward, end=until or datetime.now(UTC))
+    now = until or datetime.now(UTC)
+    wf = config.settings.models.walkforward
+    res = walk_forward(matches, pool, comps, s, wf, end=now)
     out = {
         "pool": pool,
         "cold_start": s.cold_start,
@@ -39,10 +41,17 @@ def run_walkforward(
         "predicted_matches": res.predictions.height,
         "seconds": round(time.perf_counter() - t0, 1),
     }
+    live = None
+    if wf.live_horizon_hours > 0:
+        last = {f.group: f.params for f in res.fits}  # warm start from the latest weekly fit
+        live = score_live(matches, pool, comps, s, now, timedelta(hours=wf.live_horizon_hours), init=last)
+        out["live_predicted"] = live.predictions.height
     if persist:
         from fairline.models.football.store import persist as persist_result
 
         out |= persist_result(conn, res, s.model_dump())
+        if live is not None and live.fits:
+            out["live"] = persist_result(conn, live, s.model_dump())
     return out
 
 
