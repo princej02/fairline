@@ -37,8 +37,9 @@ def plan(
     """Leagues to poll now. Two rules keep one poll doing several jobs:
     - tolerance: a window opening at `start` is already covered by any poll since
       start - w * window_tolerance_share (T-24h by a poll from T-32h, T-3h by one from T-4h);
-    - deferral: a window-only poll waits when a closing poll for that league is due within that
-      tolerance, and the closing poll then covers it.
+    - deferral: a window-only poll waits for a closing poll of that league when the closing poll
+      lands no later than the window's opening + tolerance (measured from when the window
+      opened, not from now: a window that opened yesterday is overdue and polls now).
     Closing windows get neither: a close must be a fresh price."""
     close_w = timedelta(minutes=s.close_window_minutes)
     needs: dict[str, PollNeed] = {}
@@ -46,7 +47,7 @@ def plan(
         last = last_poll.get(sport)
         upcoming = [f for f in fx if f.commence > now]
         next_close = min((f.commence - close_w for f in upcoming if f.commence - close_w > now), default=None)
-        closes, windows, tol = [], [], None
+        closes, windows, deadline = [], [], None
         for f in upcoming:
             start = f.commence - close_w
             if now >= start and (last is None or last < start):
@@ -56,8 +57,9 @@ def plan(
                 t = timedelta(hours=w * s.window_tolerance_share)
                 if now >= start and (last is None or last < start - t):
                     windows.append(f"{f.external_id[:8]} T-{w:g}h")
-                    tol = t if tol is None else min(tol, t)
-        if not closes and windows and next_close is not None and next_close - now <= tol:
+                    # a window poll may wait for a close poll, but never past start + tolerance
+                    deadline = start + t if deadline is None else min(deadline, start + t)
+        if not closes and windows and next_close is not None and next_close <= deadline:
             continue  # the closing poll due shortly will cover these windows
         if closes or windows:
             first = min(f.commence for f in upcoming)
