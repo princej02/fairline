@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import psycopg
 
@@ -71,6 +72,11 @@ def run(conn: psycopg.Connection, config: Config, args) -> int:
             + (" in the leagues that synced" if failed else "")
         )
         return 1 if failed else 0
+    if args.action == "rederive":
+        root = Path(args.cache_dir) if args.cache_dir else config.path(s.cache_dir)
+        files = sorted(root.glob(f"*/{args.date or '*'}/*_odds.json"))
+        print(P.rederive_from_cache(conn, config, files), "(cached responses only, 0 credits)")
+        return 0
     if args.action == "close":
         print(P.finalize_closing(conn, config, now))
         return 0

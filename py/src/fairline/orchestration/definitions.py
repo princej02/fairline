@@ -116,6 +116,20 @@ def odds_tick_schedule(context: ScheduleEvaluationContext):
     return RunRequest(run_key=f"odds:{context.scheduled_execution_time:%Y%m%d%H%M}")
 
 
+# Live scoring: refit each pool daily so upcoming fixtures get predictions (the walk-forward stops
+# at now, so nothing is fitted "as of" a future date). After the fdcuk refresh at 06:30.
+walkforward_job = define_asset_job(
+    "walkforward_job", selection=[dixon_coles_walkforward], partitions_def=pool_partitions
+)
+
+
+@schedule(job=walkforward_job, cron_schedule="0 7 * * *", execution_timezone="Europe/London",
+          default_status=DefaultScheduleStatus.STOPPED)  # fmt: skip
+def walkforward_daily(context: ScheduleEvaluationContext):
+    for pool in POOLS:
+        yield RunRequest(run_key=f"wf:{pool}:{context.scheduled_execution_time:%Y-%m-%d}", partition_key=pool)
+
+
 # ---------------------------------------------------------------- fixtures (P1.1-6)
 from fairline.ingest.football_data_org.sync import sync_season, sync_window  # noqa: E402
 
@@ -169,6 +183,6 @@ def fdo_window_15m(context: ScheduleEvaluationContext):
 
 defs = Definitions(
     assets=[fdcuk_season, dixon_coles_walkforward],
-    jobs=[fdcuk_job, odds_tick_job, fdo_season_job, fdo_window_job],
-    schedules=[fdcuk_current_season_daily, odds_tick_schedule, fdo_season_daily, fdo_window_15m],
+    jobs=[fdcuk_job, odds_tick_job, walkforward_job, fdo_season_job, fdo_window_job],
+    schedules=[fdcuk_current_season_daily, odds_tick_schedule, walkforward_daily, fdo_season_daily, fdo_window_15m],
 )
