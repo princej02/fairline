@@ -52,6 +52,14 @@ def main(argv: list[str] | None = None) -> int:
     bz.add_argument("--pool", required=True)
     bz.add_argument("--as-of", required=True, help="YYYY-MM-DD (UTC midnight)")
 
+    pe = sub.add_parser("edge").add_subparsers(dest="action", required=True)
+    eb = pe.add_parser("board", help="value board for one historical matchday")
+    eb.add_argument("--pool", required=True)
+    eb.add_argument("--date", required=True, help="London calendar day, YYYY-MM-DD")
+    eb.add_argument("--offset-hours", type=float, default=2.0, help="decide this long before each kickoff")
+    eb.add_argument("--all", action="store_true", help="show every evaluated price, not just the board")
+    eb.add_argument("--persist", action="store_true", help="write all evaluated prices to the edge table")
+
     args = p.parse_args(argv)
     config = get_config()
 
@@ -60,6 +68,28 @@ def main(argv: list[str] | None = None) -> int:
             applied = db.migrate(conn)
             db.sync_reference(conn, config)
             print(f"applied: {applied or 'nothing new'}; reference tables synced")
+            return 0
+
+        if args.cmd == "edge":
+            import polars as pl
+
+            from fairline.edge.run import run_board
+
+            if args.pool not in config.settings.models.dixon_coles.pools:
+                print(f"refused: unknown pool {args.pool!r}", file=sys.stderr)
+                return 2
+            board = run_board(conn, config, args.pool, args.date, args.offset_hours)
+            df = board.frame(board_only=not args.all)
+            cols = ["label", "market", "selection", "bookmaker", "price", "p_model", "p_ref", "ev_model",
+                    "ev_vs_ref", "ev_vs_ref_conservative", "stake_pct", "capped_by", "flags"]  # fmt: skip
+            with pl.Config(tbl_rows=60, tbl_cols=20, tbl_width_chars=220, fmt_str_lengths=40, float_precision=3):
+                print(df.select(cols) if not df.is_empty() else "board is empty")
+            print(f"evaluated {len(board.candidates)} prices; skipped snapshots: {board.skipped_snapshots or 'none'}")
+            if args.persist:
+                from fairline.edge.store import persist
+
+                n = persist(conn, board, config.settings.edge.devig_method)
+                print(f"persisted {n} evaluated prices")
             return 0
 
         if args.cmd == "model":

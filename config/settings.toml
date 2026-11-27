@@ -6,11 +6,32 @@ kelly_fraction = 0.25          # fractional Kelly multiplier
 max_stake_pct = 0.02           # hard cap per bet, as a fraction of bankroll
 min_ev = 0.03                  # hide edges below +3% EV on the board
 max_odds = 6.0                 # hide prices above this by default (model least reliable)
-devig_method = "power"         # multiplicative | power | shin
-# Sharp "true price" references, in priority order. Pinnacle closing is primary;
+devig_method = "power"         # multiplicative | additive | power | shin
+# Sharp "true price" references, in priority order. Pinnacle is primary;
 # Betfair Exchange is the fallback where Pinnacle is missing.
 reference_books = ["pinnacle", "betfair_ex_uk"]
-betfair_commission = 0.05      # set to your actual Betfair rate; applied before comparing prices
+# Books you can actually bet with (Pinnacle is reference-only: it doesn't take UK customers).
+bettable_books = ["bet365", "skybet", "williamhill", "paddypower", "betfair_ex_uk"]
+# Applied to Betfair prices whenever Betfair is where you would bet (EV, Kelly):
+# effective odds = 1 + (O - 1) * (1 - c). Not applied when Betfair is only the *reference*:
+# commission changes what you are paid, not the probability the price implies.
+betfair_commission = 0.05      # set to your actual Betfair rate
+
+# Exposure. Stakes are capped per bet, then per match (all markets on one match are
+# correlated), then per slate (bets open at the same time). When a cap binds, every stake
+# in that group is scaled down proportionally; none are dropped.
+max_match_exposure_pct = 0.02
+max_slate_exposure_pct = 0.10
+
+# Board defaults
+one_per_match = true           # show only the highest-EV selection per match by default
+disagreement_warn = 0.10       # flag when |model p - sharp fair p| exceeds this (likely model miss)
+conservative_quantile = 0.25   # "conservative EV" uses this posterior quantile of p when bands exist
+
+# Accas. max_odds above applies to each leg (it is about model reliability per selection);
+# the combined price has its own cap.
+acca_max_legs = 4
+acca_max_combined_odds = 20.0
 
 [markets]
 enabled = ["1X2", "OU_2.5"]    # Phase 1. Next: AH, then BTTS.

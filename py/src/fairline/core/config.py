@@ -61,9 +61,17 @@ class EdgeSettings(BaseModel):
     max_stake_pct: float = Field(gt=0, le=1)
     min_ev: float
     max_odds: float = Field(gt=1)
-    devig_method: Literal["multiplicative", "power", "shin"]
+    devig_method: Literal["multiplicative", "additive", "power", "shin"]
     reference_books: list[str]
+    bettable_books: list[str]
     betfair_commission: float = Field(ge=0, lt=1)
+    max_match_exposure_pct: float = Field(gt=0, le=1)
+    max_slate_exposure_pct: float = Field(gt=0, le=1)
+    one_per_match: bool
+    disagreement_warn: float = Field(gt=0, lt=1)
+    conservative_quantile: float = Field(gt=0, lt=0.5)
+    acca_max_legs: int = Field(ge=2)
+    acca_max_combined_odds: float = Field(gt=1)
 
 
 class FootballDataCoUkSettings(BaseModel):
@@ -173,9 +181,9 @@ def load_config(root: Path | None = None) -> Config:
     books_raw = yaml.safe_load((cfg_dir / "bookmakers.yaml").read_text())
     bookmakers = {b["code"]: Bookmaker(**b) for b in books_raw["bookmakers"]}
 
-    unknown = set(settings.edge.reference_books) - bookmakers.keys()
+    unknown = (set(settings.edge.reference_books) | set(settings.edge.bettable_books)) - bookmakers.keys()
     if unknown:
-        raise ValueError(f"edge.reference_books references unknown bookmakers: {sorted(unknown)}")
+        raise ValueError(f"edge reference/bettable books reference unknown bookmakers: {sorted(unknown)}")
     for pool, codes in settings.models.dixon_coles.pools.items():
         bad = [c for c in codes if c not in competitions]
         if bad:
