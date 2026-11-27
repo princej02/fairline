@@ -16,6 +16,7 @@ Decisions and constraints to carry into the remaining Phase 1 tasks.
 Code: `py/src/fairline/ingest/the_odds_api/`. Key: `THE_ODDS_API_KEY` in `.env`.
 
 ```
+fairline odds sync [--force]       # free fixture sync: map names, create events, 0 credits
 fairline odds plan                 # what the next tick would poll and why (free calls only)
 fairline odds budget               # credits this month + 7-day estimate from the free fixture list
 fairline odds poll [--dry-run] [--force ENG1]
@@ -25,6 +26,21 @@ fairline odds alias ok "Manchester United"
 ```
 Dagster: `odds_tick_schedule` every 5 minutes, shipped **stopped**. Turning it on is the
 decision to spend credits.
+
+**First run, in this order:**
+1. Set `THE_ODDS_API_KEY`.
+2. `fairline odds sync`: free. It maps names, creates the upcoming fixtures and fills the review
+   queue.
+3. Map every name in `fairline odds aliases`. A paid poll skips any fixture with an unmapped
+   team.
+4. `fairline odds budget`.
+5. Turn on the schedule.
+
+The tick also re-syncs each league for free whenever its fixture list refreshes (every 6h), so
+newly promoted or renamed teams reach the queue days before their first paid poll.
+
+**Scope: the 4 top divisions only** (ENG1, ESP1, GER1, FRA1), simulated at ~390 credits/month.
+Add the second tiers, or pay for a bigger tier, only after live CLV holds up in the tracker.
 
 - **Cost.** `/odds` costs markets x regions. We send `bookmakers=` (10 books = 1 region) from
   `Config.provider_books`: Pinnacle, Betfair Exchange, Sky Bet, William Hill and Paddy Power.
@@ -38,16 +54,24 @@ decision to spend credits.
 
   Simulated typical weekend, two kickoffs 2.5h apart: 4 polls instead of 6.
 - **Budget, checked before every paid call.**
-  - The API's `x-requests-remaining` must stay above `reserve_credits`.
-  - Our own monthly ledger must stay under the cap.
-  - Pacing: anything more than 10% ahead of an even monthly spend gets close polls only. Closing
-    prices are what CLV needs, so they are the last thing dropped.
-  - Every paid call is an `ingestion_run` row holding its credits, the remaining balance, the poll
-    time and which books priced which event.
-- **Honest numbers.** A simulated typical weekend across all 8 leagues needs ~168 credits, about
-  730 a month. Closing polls alone are ~420 a month, which is about what the free 500 covers. So
-  with all 8 leagues on, pacing will mostly drop the T-24h/T-3h polls. Trim
-  `ingest.the_odds_api.competitions`, or pay for a bigger tier, to keep those windows.
+  - Every poll, closing ones included, must keep the API's `x-requests-remaining` above
+    `reserve_credits` and our own monthly ledger under the cap.
+  - Window polls (T-24h/T-3h) also face two softer rules:
+    - **Burst-aware pace.** Spend may run up to `burst_days` (7) of allowance ahead of an even
+      monthly line, because fixtures cluster on weekends. A strictly linear line with a 10% slack
+      throttled window polls on Sunday 1 Feb 2026 with only the top 4 leagues; the burst rule
+      does not. Tests cover Saturday 1 Nov 2025 and Sunday 1 Feb 2026.
+    - **Close reserve.** After the poll there must still be room for the month's remaining
+      closing polls, projected from the last 7 days' close spend per day x days left. Late in a
+      busy month, window polls stop first and closing prices keep flowing.
+  - Every paid call is an `ingestion_run` row holding its kind, credits, the remaining balance,
+    the poll time and which books priced which event.
+- **Honest numbers.**
+  - Simulated typical weekends: top 4 divisions ~90 credits (~390/month), all 8 leagues ~168
+    (~730/month).
+  - With all 8 on the free tier, the rules above keep the closes and drop most window polls.
+  - Weeks with midweek rounds cost more than these weekend-only figures. `fairline odds budget`
+    estimates the next 7 days from the real fixture list.
 - **Timestamps.**
   - A snapshot's `ts` is the market's `last_update`, capped at the poll time, with
     `ts_estimated = false`.

@@ -117,18 +117,22 @@ def _at(api, conn, client, t):
 def test_full_cycle(env):
     conn, api, client = env
 
-    # T-30h: nothing in a window yet -> free fixture calls only
+    # T-30h: nothing in a window yet -> free fixture calls only, but the fresh fixture list is
+    # synced for free: names resolve, events are created, Wolves lands in review before any spend
     rep = _at(api, conn, client, KO_A - timedelta(hours=30))
     assert rep.polls == [] and api.odds_calls == 0
+    (sync,) = [x for x in rep.syncs if x.fixtures]  # other leagues have no fixtures in the fake API
+    assert (sync.competition, sync.fixtures, sync.events, sync.created) == ("ENG1", 3, 2, 2)
+    assert sync.auto_matched == {"Manchester United": "Man United"}  # the other three are exact
+    assert sync.unresolved == ["Wolverhampton Wanderers"]
+    review = conn.execute("SELECT alias, competition FROM participant_alias_review").fetchall()
+    assert review == [("Wolverhampton Wanderers", "ENG1")]
 
-    # T-23h: A's T-24h window -> one EPL poll; names resolve, C's Wolves goes to review
+    # T-23h: A's T-24h window -> one EPL paid poll onto the events the sync already made
     rep = _at(api, conn, client, KO_A - timedelta(hours=23))
     (p,) = rep.polls
     assert (p.competition, p.kind, p.status, p.credits) == ("ENG1", "window", "ok", 2)
-    assert p.unresolved == ["Wolverhampton Wanderers"] and p.events == 2 and p.created == 2
-    assert p.auto_matched == {"Manchester United": "Man United"}  # the other three are exact
-    review = conn.execute("SELECT alias, competition FROM participant_alias_review").fetchall()
-    assert review == [("Wolverhampton Wanderers", "ENG1")]
+    assert p.unresolved == ["Wolverhampton Wanderers"] and p.events == 2 and p.created == 0
     a_id = conn.execute(
         "SELECT event_id FROM event_external_id WHERE provider = 'the_odds_api' AND external_id = 'evA'"
     ).fetchone()[0]
@@ -157,8 +161,9 @@ def test_full_cycle(env):
     assert dict(((b, s), p) for b, s, p, _ in rows)[("pinnacle", "home")] == pytest.approx(2.93)  # 3rd poll's price
 
     # credits ledger matches the API's own count; the key is nowhere in the DB
-    spent, remaining = ledger(conn, KO_A + timedelta(minutes=2))
-    assert spent == 2 * api.odds_calls and remaining == api.remaining
+    led = ledger(conn, KO_A + timedelta(minutes=2))
+    assert led.spent_month == 2 * api.odds_calls and led.remaining == api.remaining
+    assert led.close_7d == 2  # one closing poll
     dump = json.dumps(conn.execute("SELECT stats, error FROM ingestion_run").fetchall(), default=str)
     assert KEY not in dump
 

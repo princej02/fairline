@@ -3,7 +3,7 @@
 fairline db migrate
 fairline ingest fdcuk --competition ENG1 --season 2024-25 [--force]
 fairline ingest fdcuk --backfill
-fairline odds plan | poll [--dry-run] [--force ENG1] | close | budget | aliases | alias add NAME TEAM
+fairline odds sync | plan | poll [--dry-run] [--force ENG1] | close | budget | aliases | alias add NAME TEAM
 """
 
 from __future__ import annotations
@@ -77,6 +77,8 @@ def main(argv: list[str] | None = None) -> int:
         dest="action", required=True
     )
     po.add_parser("plan", help="what the next tick would poll and why (free calls only)")
+    psy = po.add_parser("sync", help="free fixture sync: map team names and create events, 0 credits")
+    psy.add_argument("--force", action="store_true", help="refetch fixture lists even if cached")
     pp = po.add_parser("poll", help="run one scheduler tick: plan, budget check, poll, mark closing")
     pp.add_argument("--dry-run", action="store_true", help="free fixture calls only; spend nothing")
     pp.add_argument("--force", action="append", default=[], metavar="COMP", help="poll this competition now")

@@ -89,7 +89,7 @@ class TheOddsApiSettings(BaseModel):
     competitions: list[str]
     monthly_credit_budget: int = Field(gt=0)
     reserve_credits: int = Field(ge=0)
-    pace_slack: float = Field(ge=0, le=1)
+    burst_days: float = Field(ge=0, le=31)
     warn_at: float = Field(gt=0, le=1)
     poll_windows_hours: list[float]
     window_tolerance_share: float = Field(ge=0, lt=1)

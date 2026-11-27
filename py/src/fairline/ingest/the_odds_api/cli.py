@@ -48,11 +48,35 @@ def run(conn: psycopg.Connection, config: Config, args) -> int:
         dry = args.action == "plan" or args.dry_run
         _print_tick(P.tick(conn, config, now=now, dry_run=dry, force=getattr(args, "force", [])))
         return 0
+    if args.action == "sync":
+        rows = P.sync_all(conn, config, now=now, force=args.force)
+        for r in rows:
+            if r.error:
+                print(f"  {r.competition:<5} error: {r.error}")
+                continue
+            print(
+                f"  {r.competition:<5} {r.fixtures} fixtures, {r.events} matched ({r.created} new, {r.linked} linked)"
+            )
+            for n, ours in r.auto_matched.items():
+                print(f"        auto-matched {n!r} -> {ours!r}")
+            if r.unresolved:
+                print(f"        unresolved: {r.unresolved}")
+        todo = sum(len(r.unresolved) for r in rows)
+        failed = [r.competition for r in rows if r.error]
+        if failed:
+            print(f"sync FAILED for {failed}: nothing mapped there yet")
+        print(
+            "free calls only, 0 credits. "
+            + (f"{todo} names to map: `fairline odds aliases`" if todo else "no names to map")
+            + (" in the leagues that synced" if failed else "")
+        )
+        return 1 if failed else 0
     if args.action == "close":
         print(P.finalize_closing(conn, config, now))
         return 0
     if args.action == "budget":
-        spent, remaining = P.ledger(conn, now)
+        led = P.ledger(conn, now)
+        spent, remaining = led.spent_month, led.remaining
         client = P.make_client(config)
         sports = [config.competition(c).provider_code(PROVIDER) for c in s.competitions]
         fx = {sp: P.to_fixtures(client.events(sp).data) for sp in sports}

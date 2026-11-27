@@ -29,27 +29,99 @@ def test_season_label_for():
     assert season_label_for(datetime(2027, 5, 20).date()) == "2026-27"
 
 
+def L(spent, remaining=None, close_7d=0):
+    return B.Ledger(spent, remaining, close_7d)
+
+
 class TestBudget:
     mid = datetime(2025, 1, 16, 12, tzinfo=UTC)  # ~half the month gone
 
     def test_allows_normal_spend(self):
-        assert B.decide("window", 2, 100, 400, self.mid, S).allowed
+        assert B.decide("window", 2, L(100, 400), self.mid, S).allowed
 
     def test_hard_floor_from_api_remaining(self):
-        d = B.decide("close", 2, 0, S.reserve_credits + 1, self.mid, S)
+        d = B.decide("close", 2, L(0, S.reserve_credits + 1), self.mid, S)
         assert not d.allowed and "reserve" in d.reason
 
     def test_monthly_cap_applies_even_to_close_polls(self):
-        d = B.decide("close", 2, S.monthly_credit_budget - S.reserve_credits - 1, None, self.mid, S)
+        d = B.decide("close", 2, L(S.monthly_credit_budget - S.reserve_credits - 1), self.mid, S)
         assert not d.allowed and "monthly budget" in d.reason
 
-    def test_pacing_drops_window_polls_but_keeps_close_polls(self):
-        spent = int(S.monthly_credit_budget * (B.month_elapsed(self.mid) + S.pace_slack))  # right at pace
-        assert not B.decide("window", 2, spent, None, self.mid, S).allowed
-        assert B.decide("close", 2, spent, None, self.mid, S).allowed
+    def test_pace_drops_window_polls_but_keeps_close_polls(self):
+        days = B.days_in_month(self.mid)
+        at_pace = int(S.monthly_credit_budget * (B.month_elapsed(self.mid) + S.burst_days / days))
+        assert not B.decide("window", 2, L(at_pace), self.mid, S).allowed
+        assert B.decide("close", 2, L(at_pace), self.mid, S).allowed
+
+    def test_window_polls_leave_room_for_the_rest_of_the_months_closes(self):
+        late = datetime(2025, 1, 25, 12, tzinfo=UTC)  # ~6.5 days left
+        # 70 close credits in the last 7 days -> ~65 to reserve; 380 spent leaves 110 - 10 reserve
+        assert B.decide("window", 2, L(380, close_7d=0), late, S).allowed
+        d = B.decide("window", 2, L(430, close_7d=70), late, S)
+        assert not d.allowed and "closing polls" in d.reason
+        assert B.decide("close", 2, L(430, close_7d=70), late, S).allowed
 
     def test_warns_past_threshold(self):
-        assert B.decide("close", 2, int(S.monthly_credit_budget * S.warn_at), None, self.mid, S).warn
+        assert B.decide("close", 2, L(int(S.monthly_credit_budget * S.warn_at)), self.mid, S).warn
+
+
+def _top4_weekend(fri: datetime) -> dict[str, list[Fixture]]:
+    def at(d, hm, n=1):
+        h, m = map(int, hm.split(":"))
+        return [fri + timedelta(days=d, hours=h, minutes=m)] * n
+
+    week = {
+        "soccer_epl": at(1, "12:30") + at(1, "15:00", 5) + at(1, "17:30") + at(2, "14:00", 2) + at(2, "16:30") + at(3, "20:00"),
+        "soccer_spain_la_liga": at(0, "20:00") + at(1, "13:00") + at(1, "15:15") + at(1, "17:30") + at(1, "20:00")
+        + at(2, "13:00") + at(2, "15:15") + at(2, "17:30") + at(2, "20:00") + at(3, "20:00"),
+        "soccer_germany_bundesliga": at(0, "19:30") + at(1, "14:30", 5) + at(1, "17:30") + at(2, "14:30") + at(2, "16:30"),
+        "soccer_france_ligue_one": at(0, "19:00") + at(1, "16:00") + at(1, "18:00") + at(1, "20:00") + at(2, "14:00")
+        + at(2, "16:15", 3) + at(2, "19:45"),
+    }  # fmt: skip
+    return {k: [Fixture(f"{k[-6:]}{i:02d}", t) for i, t in enumerate(v)] for k, v in week.items()}
+
+
+def _run_with_budget(fx, start, end, s, linear_slack=None):
+    """Tick the planner through [start, end] applying the budget; returns (made, skipped) lists."""
+    led, last, made, skipped = L(0), {}, [], []
+    t = start
+    while t <= end:
+        for need in plan(fx, last, t, s):
+            if linear_slack is not None:  # the old rule, for comparison: strictly linear + slack
+                pace = s.monthly_credit_budget * (B.month_elapsed(t) + linear_slack)
+                ok = need.kind == "close" or led.spent_month + 2 <= pace
+            else:
+                ok = B.decide(need.kind, 2, led, t, s).allowed
+            if ok:
+                made.append((t, need.sport, need.kind))
+                last[need.sport] = t
+                led = L(led.spent_month + 2, None, led.close_7d + (2 if need.kind == "close" else 0))
+            else:
+                skipped.append((t, need.sport, need.kind))
+        t += timedelta(minutes=s.tick_minutes)
+    return made, skipped
+
+
+@pytest.mark.parametrize("fri", [datetime(2025, 10, 31, tzinfo=UTC), datetime(2026, 1, 30, tzinfo=UTC)])
+def test_month_opening_on_a_weekend_slate_is_not_throttled(fri):
+    # Sat 1 Nov 2025 and Sun 1 Feb 2026: the month's first day lands on a full top-4 weekend
+    fx = _top4_weekend(fri)
+    made, skipped = _run_with_budget(fx, fri - timedelta(days=1), fri + timedelta(days=4), S)
+    assert skipped == [] and sum(k == "close" for *_, k in made) >= 20
+
+
+def test_strictly_linear_pacing_would_have_throttled_a_sunday_first():
+    fri = datetime(2026, 1, 30, tzinfo=UTC)  # Sun 1 Feb 2026
+    _, old_skipped = _run_with_budget(
+        _top4_weekend(fri), fri - timedelta(days=1), fri + timedelta(days=4), S, linear_slack=0.10
+    )
+    assert any(k == "window" for *_, k in old_skipped)
+
+
+def test_four_top_divisions_fit_the_free_tier():
+    fri = datetime(2025, 1, 17, tzinfo=UTC)
+    made, _ = _run_with_budget(_top4_weekend(fri), fri - timedelta(days=2), fri + timedelta(days=4), S)
+    assert len(made) * 2 * 30.4 / 7 < S.monthly_credit_budget - S.reserve_credits
 
 
 class TestPlanner:

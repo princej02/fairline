@@ -19,7 +19,7 @@ from fairline.core.config import Config
 from fairline.ingest.the_odds_api import budget as B
 from fairline.ingest.the_odds_api.client import OddsApiClient, OddsApiError
 from fairline.ingest.the_odds_api.parse import fixtures as to_fixtures
-from fairline.ingest.the_odds_api.parse import parse_odds
+from fairline.ingest.the_odds_api.parse import parse_events, parse_odds
 from fairline.ingest.the_odds_api.planner import Fixture, PollNeed, plan
 from fairline.ingest.the_odds_api.resolve import PROVIDER, resolve_event, resolve_teams
 
@@ -36,19 +36,23 @@ def ou_lines(config: Config) -> set[float]:
 
 
 # ---------------------------------------------------------------------- ledger
-def ledger(conn: psycopg.Connection, now: datetime) -> tuple[int, int | None]:
-    """(credits we spent this calendar month, the API's last reported remaining balance)."""
-    spent = conn.execute(
-        "SELECT coalesce(sum((stats->>'credits')::int), 0) FROM ingestion_run "
-        "WHERE source = %s AND started_at >= %s AND stats ? 'credits'",
-        (PROVIDER, B.month_start(now)),
-    ).fetchone()[0]
-    rem = conn.execute(
-        "SELECT (stats->>'remaining')::int FROM ingestion_run WHERE source = %s AND stats ? 'remaining' "
-        "AND stats->>'remaining' IS NOT NULL ORDER BY started_at DESC LIMIT 1",
-        (PROVIDER,),
+def ledger(conn: psycopg.Connection, now: datetime) -> B.Ledger:
+    """Credits spent this calendar month, the API's last reported balance, and the last 7 days'
+    closing-poll spend (the basis for reserving credits for the rest of the month's closes)."""
+    spent, close_7d = conn.execute(
+        """
+        SELECT coalesce(sum((stats->>'credits')::int) FILTER (WHERE started_at >= %s), 0),
+               coalesce(sum((stats->>'credits')::int) FILTER (WHERE started_at >= %s AND stats->>'kind' = 'close'), 0)
+        FROM ingestion_run WHERE source = %s AND stats ? 'credits' AND started_at <= %s
+        """,
+        (B.month_start(now), now - timedelta(days=7), PROVIDER, now),
     ).fetchone()
-    return int(spent), (rem[0] if rem else None)
+    rem = conn.execute(
+        "SELECT (stats->>'remaining')::int FROM ingestion_run WHERE source = %s AND stats->>'remaining' IS NOT NULL "
+        "AND started_at <= %s ORDER BY started_at DESC LIMIT 1",
+        (PROVIDER, now),
+    ).fetchone()
+    return B.Ledger(int(spent), rem[0] if rem else None, int(close_7d))
 
 
 def last_polls(conn: psycopg.Connection, sports: list[str]) -> dict[str, datetime | None]:
@@ -179,6 +183,67 @@ def poll_competition(
     return res
 
 
+# ---------------------------------------------------------------------- fixture sync (free)
+@dataclass
+class SyncResult:
+    competition: str
+    fixtures: int = 0
+    events: int = 0
+    created: int = 0
+    linked: int = 0
+    unresolved: list[str] = field(default_factory=list)
+    auto_matched: dict[str, str] = field(default_factory=dict)
+    error: str = ""
+
+
+def sync_fixtures(
+    conn: psycopg.Connection, config: Config, comp_code: str, data: list[dict], now: datetime
+) -> SyncResult:
+    """Resolve team names and create/link scheduled events from a free /events response, so
+    unmapped names reach the review queue before any paid poll needs them."""
+    comp = config.competition(comp_code)
+    out = SyncResult(comp_code)
+    evs = [e for e in parse_events(data) if e.commence > now]
+    out.fixtures = len(evs)
+    if not evs:
+        return out
+    with conn.transaction():
+        sport_id, comp_id = conn.execute(
+            "SELECT sport_id, id FROM competition WHERE code = %s", (comp_code,)
+        ).fetchone()
+        teams = resolve_teams(conn, comp, sport_id, [n for e in evs for n in (e.home, e.away)], now)
+        out.unresolved, out.auto_matched = sorted(teams.unresolved), teams.auto_matched
+        for e in evs:
+            if e.home in teams.ids and e.away in teams.ids:
+                _, how = resolve_event(
+                    conn, comp, comp_id, e.external_id, teams.ids[e.home], teams.ids[e.away], e.commence
+                )
+                out.events += 1
+                out.created += how == "created"
+                out.linked += how == "linked"
+    return out
+
+
+def sync_all(
+    conn: psycopg.Connection,
+    config: Config,
+    client: OddsApiClient | None = None,
+    now: datetime | None = None,
+    force: bool = False,
+) -> list[SyncResult]:
+    now = now or datetime.now(UTC)
+    client = client or make_client(config)
+    out = []
+    for c in config.settings.odds_api.competitions:
+        try:
+            data = client.events(config.competition(c).provider_code(PROVIDER), force=force).data
+        except OddsApiError as e:
+            out.append(SyncResult(c, error=str(e)))
+            continue
+        out.append(sync_fixtures(conn, config, c, data, now))
+    return out
+
+
 # ---------------------------------------------------------------------- closing
 def finalize_closing(conn: psycopg.Connection, config: Config, now: datetime, lookback_days: int = 7) -> dict:
     """For each kicked-off event with live odds and no live closing rows yet: if a poll landed in
@@ -239,6 +304,7 @@ class TickReport:
     needs: list[PollNeed] = field(default_factory=list)
     polls: list[PollResult] = field(default_factory=list)
     closing: dict = field(default_factory=dict)
+    syncs: list[SyncResult] = field(default_factory=list)
     spent: int = 0
     remaining: int | None = None
     warnings: list[str] = field(default_factory=list)
@@ -261,21 +327,29 @@ def tick(
     by_sport = {config.competition(c).provider_code(PROVIDER): c for c in s.competitions}
     for sport, comp in by_sport.items():
         try:
-            rep.fixtures[sport] = [f for f in to_fixtures(client.events(sport).data) if f.commence > now]
+            ev = client.events(sport)
         except OddsApiError as e:
             rep.warnings.append(f"{comp} fixtures: {e}")
+            continue
+        rep.fixtures[sport] = [f for f in to_fixtures(ev.data) if f.commence > now]
+        if not ev.from_cache and not dry_run:  # fresh list (every events_refresh_hours): free name/event sync
+            sr = sync_fixtures(conn, config, comp, ev.data, now)
+            rep.syncs.append(sr)
+            if sr.unresolved:
+                rep.warnings.append(f"{comp}: unmapped team names {sr.unresolved}; see `fairline odds aliases`")
     rep.needs = plan(rep.fixtures, last_polls(conn, list(by_sport)), now, s)
     for c in force or []:
         sport = config.competition(c).provider_code(PROVIDER)
         if all(n.sport != sport for n in rep.needs):
             rep.needs.append(PollNeed(sport, "window", now, ["forced"]))
-    rep.spent, rep.remaining = ledger(conn, now)
+    led = ledger(conn, now)
+    rep.spent, rep.remaining = led.spent_month, led.remaining
     cost = B.call_cost(s.markets, len(config.provider_books(PROVIDER)))
     for need in rep.needs:
         comp = by_sport.get(need.sport) or next(
             c for c in force or [] if config.competition(c).provider_code(PROVIDER) == need.sport
         )
-        d = B.decide(need.kind, cost, rep.spent, rep.remaining, now, s)
+        d = B.decide(need.kind, cost, led, now, s)
         if d.warn and not any("budget" in w for w in rep.warnings):
             rep.warnings.append(f"credit budget: {rep.spent + cost}/{s.monthly_credit_budget} used this month")
         if not d.allowed:
@@ -288,6 +362,7 @@ def tick(
         rep.polls.append(r)
         rep.spent += r.credits
         rep.remaining = r.remaining if r.remaining is not None else rep.remaining
+        led = B.Ledger(rep.spent, rep.remaining, led.close_7d + (r.credits if r.kind == "close" else 0))
     if not dry_run:
         rep.closing = finalize_closing(conn, config, now)
     for w in rep.warnings:

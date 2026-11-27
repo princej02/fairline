@@ -52,10 +52,11 @@ cache_dir = "data/raw/football_data_co_uk"
 # Bet365 is not on The Odds API (null in bookmakers.yaml); it stays historical-only.
 base_url = "https://api.the-odds-api.com/v4"
 markets = "h2h,totals"
-competitions = ["ENG1", "ENG2", "ESP1", "ESP2", "GER1", "GER2", "FRA1", "FRA2"]
+competitions = ["ENG1", "ESP1", "GER1", "FRA1"]   # top divisions only on the free tier (~390 credits/month simulated); add the second tiers after live CLV holds up
 monthly_credit_budget = 500     # free tier; the poller must stay under this
 reserve_credits = 10            # never spend the last few (manual checks, mistakes)
-pace_slack = 0.10               # ahead of the month's pace by more than this -> close polls only
+burst_days = 7                  # window polls may run this many days of allowance ahead of an even
+                                # monthly spend (weekend slates cluster); closing polls are exempt
 warn_at = 0.80                  # warn when this share of the month's budget is used
 poll_windows_hours = [24, 3]    # poll a league once each fixture enters these windows (3h = news re-score)
 window_tolerance_share = 0.34   # a poll up to this share of a window early covers it (T-24h <- T-32h)
