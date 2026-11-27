@@ -161,6 +161,14 @@ class TestPlanner:
             ("18 17:10", "close"),
         ]
 
+    def test_overdue_window_is_not_deferred(self):
+        # regression (first live tick, 2026-11-27): fixtures at 19:30 never polled, T-24h opened
+        # yesterday. At 15:00 the close (19:10) is within 8h of *now* but long past the T-24h
+        # window's deadline (open + 8h), so the poll must happen now, not at T-3h.
+        fx = {"soccer_germany_bundesliga": [Fixture("g" * 8, T0.replace(hour=19, minute=30))]}
+        (need,) = plan(fx, {}, T0, S)
+        assert need.kind == "window"
+
     def test_window_poll_deferred_into_imminent_close(self):
         now = T0 + timedelta(hours=2, minutes=30) - timedelta(hours=3)  # b's T-3h opens at 14:30
         assert plan(self.fx, {"soccer_epl": T0 - timedelta(hours=3)}, now, S) == []  # a closes at 14:40
