@@ -15,13 +15,19 @@ dependencies = [
   "scipy>=1.14",
   "numpy>=2.0",
   "pymc>=5.20",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
 ]
 
 [project.scripts]
 fairline = "fairline.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.3", "ruff>=0.8"]
+dev = [
+    "httpx>=0.29.0",
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -43,6 +49,7 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]  # ruff format enforces line length for code; long SQL strings are fine
 
 [tool.uv]
 # uv-managed CPython bundles its own OpenSSL; avoids breakage from system/pyenv builds.

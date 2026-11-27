@@ -95,3 +95,7 @@ tune = 1000
 chains = 4
 interval = 0.90                 # prob_lo / prob_hi = central 90% credible interval
 target_accept = 0.90            # NUTS step-size target; 0.95 tested, no fewer divergences
+
+[tracker]
+bankroll = 1000.0               # used to turn suggested stake fractions into amounts; set your own
+currency = "GBP"

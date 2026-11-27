@@ -105,3 +105,33 @@ Next steps this points to:
    replacement. The default board should probably require `ev_vs_ref >= 0`.
 3. Re-check band width after tuning; the time-decay weights probably inflate the
    posterior variance.
+
+## P1.5 API and dashboard (done)
+
+Run: `make api` (FastAPI on :8000) and `make web` (Next.js on :3100; `/api/*` is proxied to the API).
+
+Built around P1.4's result: only soft-book prices that beat devigged Pinnacle beat the close.
+So the dashboard's job is to verify live CLV, not to surface raw model EV.
+
+- **API** (`py/src/fairline/api/`): thin. Routes call `edge.board.evaluate/select`,
+  `edge.kelly.size`, `edge.acca.build` and `tracker.service` directly. Pydantic schemas mirror
+  the domain dataclasses.
+- **Value board** (`/`): defaults to "Must beat Pinnacle". Model EV and Pinnacle EV sit side by
+  side. Probabilities show PyMC bands when "Uncertainty bands" is on (about 5-10 s per slate,
+  cached in-process), along with an effective-sample badge, a `Model ≠ Market` badge, and
+  cold-start and capped-stake markers. "Log bet" pre-fills the tracker with the book, odds,
+  suggested stake and decision time.
+- **Event page** (`/events/[id]`): Lightweight Charts loaded via `next/dynamic({ ssr: false })`.
+  Pinnacle is the bold line and the bettable books are thin ones. Every football-data.co.uk
+  point has an estimated timestamp and is drawn dashed.
+- **Backtests** (`/backtests/[id]`): CLV with its bootstrap CI is the headline and ROI comes
+  second. 1X2 and O/U 2.5 calibration plots sit side by side.
+- **Tracker** (`/tracker`): each leg stores the devigged sharp price at placement
+  (`execution_edge`: real edge, or a stale line?) and the devigged close (`clv`). Results and
+  CLV fill in on refresh. The headline is CLV with a matchday-cluster bootstrap CI.
+- **Acca builder** (`/acca`): legs come from the board. Same-match groups get exact joint
+  probabilities and a field for the bet-builder price.
+
+Not yet live: every price is still historical football-data.co.uk data. Live boards need the
+Odds API poller (P1.1-7) and the football-data.org fixtures (P1.1-6). Until those exist, the
+tracker works on historical matches, with placement time pre-filled as the decision time.

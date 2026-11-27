@@ -116,6 +116,11 @@ class ModelSettings(BaseModel):
     bayes: BayesSettings
 
 
+class TrackerSettings(BaseModel):
+    bankroll: float = Field(gt=0)
+    currency: str
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -123,6 +128,7 @@ class Settings(BaseModel):
     markets: dict[str, Any]
     ingest: dict[str, Any]
     models: ModelSettings
+    tracker: TrackerSettings
 
     @property
     def fdcuk(self) -> FootballDataCoUkSettings:

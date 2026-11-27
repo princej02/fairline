@@ -53,6 +53,7 @@ def fit_and_predict(
     b: BayesSettings,
     random_seed: int = 7,
     max_predictive_draws: int = 1000,
+    conservative_quantile: float = 0.25,
 ) -> BayesResult:
     s_window = replace_history(s, b.history_days)
     train = dc.training_frame(matches, as_of, s_window)
@@ -157,6 +158,7 @@ def fit_and_predict(
                     "event_id": ev["event_id"], "market": market, "line": line, "selection": selection,
                     "prob": float(p.mean()), "prob_lo": float(np.quantile(p, lo_q)),
                     "prob_hi": float(np.quantile(p, hi_q)),
+                    "prob_conservative": float(np.quantile(p, conservative_quantile)),
                 }
             )  # fmt: skip
 

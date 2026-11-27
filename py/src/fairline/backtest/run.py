@@ -59,10 +59,31 @@ def run_backtest(
             "edge": config.settings.edge.model_dump(),
             "model_config_hash": config_hash(config.settings.models.dixon_coles),
         }
+        per_season = (
+            res.bets.group_by("strategy", "season")
+            .agg(pl.len().alias("bets"), pl.col("flat_pnl").mean().alias("flat_roi"), pl.col("clv").mean().alias("clv"))
+            .sort("strategy", "season")
+        )
         metrics = {
             "betting": res.summary.to_dicts(),
             "probability": res.prob_summary.to_dicts(),
             "blend_weights": {f"{p}/{x}": v for (p, x), v in res.blend_weights.items()},
+            "per_season": per_season.to_dicts(),
+            "calibration": {
+                m: [
+                    {
+                        "lo": b.lo,
+                        "hi": b.hi,
+                        "n": b.n,
+                        "mean_p": b.mean_p,
+                        "observed": b.observed,
+                        "ci_lo": b.ci_lo,
+                        "ci_hi": b.ci_hi,
+                    }
+                    for b in bins
+                ]
+                for m, bins in res.calibration.items()
+            },
         }
         bid = conn.execute(
             "INSERT INTO backtest_run (config, metrics, finished_at) VALUES (%s, %s, now()) RETURNING id",
