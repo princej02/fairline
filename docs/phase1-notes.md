@@ -15,8 +15,13 @@ Decisions and constraints to carry into the remaining Phase 1 tasks.
 
 - Billing: each `/odds` call costs `markets x regions` credits; `/events` and `/sports` are free.
   Pinnacle is only in the `eu` region, so `uk,eu` x `h2h,totals` = 4 credits per league per poll.
-  Use `bookmakers=pinnacle,betfair_ex_uk,...` instead (every 10 books bill as one region): 2 credits.
-  Check which of our UK books the API actually carries before relying on any of them.
+  Use `bookmakers=` instead (every 10 books bill as one region): 2 credits. Build the list from
+  `Config.provider_books("the_odds_api")`: Pinnacle, Betfair Exchange, Sky Bet, William Hill and
+  Paddy Power. Bet365 is not carried by The Odds API, so it is left out (no wasted slot, no
+  missing-row alarms). It stays historical-only via football-data.co.uk, so live Bet365 prices
+  can't appear on the board; it stays bettable and you can still log Bet365 bets by hand. A paid UK
+  aggregator (Odds-API.io, TheStatsAPI) would carry Bet365 and Pinnacle in one feed if that's ever
+  worth paying for. Re-check the remaining keys against `/sports/{sport}/odds` on the first live run.
 - Budget: 500 credits/month over 8 leagues at 2 credits is ~31 polls per league per month. Poll each
   league only on matchdays, once ~T-24h and once ~T-3h (the news re-score), plus a closing grab at
   kickoff; skip leagues with no fixture in the window (from the free `/events` call).

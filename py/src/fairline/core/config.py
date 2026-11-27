@@ -162,6 +162,15 @@ class Config(BaseModel):
         except KeyError:
             raise NotAllowed(f"competition {code!r} is not in the allowlist (config/competitions.yaml)") from None
 
+    def provider_books(self, provider: str) -> dict[str, str]:
+        """Our code -> the provider's key, for books that provider actually carries. A null mapping
+        (e.g. Bet365 on The Odds API) means historical-only: never request it, never expect rows."""
+        return {
+            code: key
+            for code, b in self.bookmakers.items()
+            if b.kind != "aggregate" and (key := b.providers.get(provider))
+        }
+
     def competitions_for(self, provider: str, sport: str = "football") -> list[Competition]:
         return [c for c in self.competitions.values() if c.sport == sport and c.providers.get(provider)]
 

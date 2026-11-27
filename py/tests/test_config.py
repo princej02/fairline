@@ -28,3 +28,12 @@ def test_season_range():
     assert season_range("2023-24", "2025-26") == ["2023-24", "2024-25", "2025-26"]
     with pytest.raises(ValueError):
         season_range("2023-25", "2025-26")
+
+
+def test_odds_api_books_exclude_bet365_and_fit_one_region():
+    from fairline.core.config import get_config
+
+    books = get_config().provider_books("the_odds_api")
+    assert "bet365" not in books  # historical-only via football-data.co.uk
+    assert {"pinnacle", "betfair_ex_uk"} <= books.keys()  # both sharp references are live
+    assert "market_max" not in books and len(books) <= 10  # <= 10 books bill as one region
