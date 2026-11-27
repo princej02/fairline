@@ -1,0 +1,3 @@
+# Local sqlite run storage inside the dagster_home volume. Switch to dagster-postgres on the VPS if needed.
+telemetry:
+  enabled: false

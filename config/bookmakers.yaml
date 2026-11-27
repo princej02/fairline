@@ -1,0 +1,13 @@
+# kind: book | exchange | aggregate (aggregate = market max/average columns, not a real book)
+# is_sharp: used as a "true price" reference candidate (see settings.toml edge.reference_books)
+# the_odds_api: bookmaker key in that API; null = not offered there (re-check when that adapter is built)
+
+bookmakers:
+  - {code: pinnacle,      name: Pinnacle,         kind: book,      is_sharp: true,  providers: {the_odds_api: pinnacle}}
+  - {code: betfair_ex_uk, name: Betfair Exchange, kind: exchange,  is_sharp: true,  providers: {the_odds_api: betfair_ex_uk}}
+  - {code: bet365,        name: Bet365,           kind: book,      is_sharp: false, providers: {the_odds_api: null}}
+  - {code: skybet,        name: Sky Bet,          kind: book,      is_sharp: false, providers: {the_odds_api: skybet}}
+  - {code: williamhill,   name: William Hill,     kind: book,      is_sharp: false, providers: {the_odds_api: williamhill}}
+  - {code: paddypower,    name: Paddy Power,      kind: book,      is_sharp: false, providers: {the_odds_api: paddypower}}
+  - {code: market_max,    name: Market maximum,   kind: aggregate, is_sharp: false, providers: {}}
+  - {code: market_avg,    name: Market average,   kind: aggregate, is_sharp: false, providers: {}}

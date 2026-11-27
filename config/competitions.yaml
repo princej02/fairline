@@ -1,0 +1,34 @@
+# Strict allowlist. Anything not listed here is rejected by every pipeline.
+# Provider codes: null means that provider does not cover the competition.
+# the_odds_api keys should be re-checked against GET /v4/sports when that adapter is built.
+
+football:
+  # ---- Leagues (Phase 1: covered by football-data.co.uk) ----
+  - {code: ENG1, name: Premier League,  country: ENG, kind: league, providers: {football_data_co_uk: E0,  football_data_org: PL,  the_odds_api: soccer_epl}}
+  - {code: ENG2, name: Championship,    country: ENG, kind: league, providers: {football_data_co_uk: E1,  football_data_org: ELC, the_odds_api: soccer_efl_champ}}
+  - {code: ESP1, name: La Liga,         country: ESP, kind: league, providers: {football_data_co_uk: SP1, football_data_org: PD,  the_odds_api: soccer_spain_la_liga}}
+  - {code: ESP2, name: Segunda Division, country: ESP, kind: league, providers: {football_data_co_uk: SP2, football_data_org: null, the_odds_api: soccer_spain_segunda_division}}
+  - {code: GER1, name: Bundesliga,      country: GER, kind: league, providers: {football_data_co_uk: D1,  football_data_org: BL1, the_odds_api: soccer_germany_bundesliga}}
+  - {code: GER2, name: 2. Bundesliga,   country: GER, kind: league, providers: {football_data_co_uk: D2,  football_data_org: null, the_odds_api: soccer_germany_bundesliga2}}
+  - {code: FRA1, name: Ligue 1,         country: FRA, kind: league, providers: {football_data_co_uk: F1,  football_data_org: FL1, the_odds_api: soccer_france_ligue_one}}
+  - {code: FRA2, name: Ligue 2,         country: FRA, kind: league, providers: {football_data_co_uk: F2,  football_data_org: null, the_odds_api: soccer_france_ligue_two}}
+
+  # ---- Domestic cups (in scope; no historical odds source yet) ----
+  - {code: ENG_FAC, name: FA Cup,          country: ENG, kind: cup, providers: {football_data_co_uk: null, football_data_org: null, the_odds_api: soccer_fa_cup}}
+  - {code: ENG_LC,  name: EFL Cup,         country: ENG, kind: cup, providers: {football_data_co_uk: null, football_data_org: null, the_odds_api: soccer_england_efl_cup}}
+  - {code: ESP_CDR, name: Copa del Rey,    country: ESP, kind: cup, providers: {football_data_co_uk: null, football_data_org: null, the_odds_api: soccer_spain_copa_del_rey}}
+  - {code: GER_DFB, name: DFB-Pokal,       country: GER, kind: cup, providers: {football_data_co_uk: null, football_data_org: null, the_odds_api: soccer_germany_dfb_pokal}}
+  - {code: FRA_CDF, name: Coupe de France, country: FRA, kind: cup, providers: {football_data_co_uk: null, football_data_org: null, the_odds_api: soccer_france_coupe_de_france}}
+
+  # ---- Continental ----
+  - {code: UCL, name: Champions League, country: null, kind: continental, providers: {football_data_co_uk: null, football_data_org: CL,   the_odds_api: soccer_uefa_champs_league}}
+  - {code: UEL, name: Europa League,    country: null, kind: continental, providers: {football_data_co_uk: null, football_data_org: null, the_odds_api: soccer_uefa_europa_league}}
+
+  # ---- International ----
+  - {code: WC,      name: FIFA World Cup,              country: null, kind: international, providers: {football_data_co_uk: null, football_data_org: WC,   the_odds_api: soccer_fifa_world_cup}}
+  - {code: WCQ_EU,  name: World Cup Qualifiers (UEFA), country: null, kind: international, providers: {football_data_co_uk: null, football_data_org: null, the_odds_api: soccer_fifa_world_cup_qualifiers_europe}}
+  - {code: EURO,    name: UEFA European Championship,  country: null, kind: international, providers: {football_data_co_uk: null, football_data_org: EC,   the_odds_api: soccer_uefa_european_championship}}
+  - {code: EUROQ,   name: Euro Qualifiers,             country: null, kind: international, providers: {football_data_co_uk: null, football_data_org: null, the_odds_api: soccer_uefa_euro_qualification}}
+  - {code: UNL,     name: UEFA Nations League,         country: null, kind: international, providers: {football_data_co_uk: null, football_data_org: null, the_odds_api: soccer_uefa_nations_league}}
+
+# Later phases (one sport at a time): nba, nfl, ufc, boxing, f1, racing (UK/IRE).

@@ -1,0 +1,42 @@
+# Fairline settings: the single place for tunable defaults.
+# Secrets (API keys, tokens, DB passwords) live in .env, never here.
+
+[edge]
+kelly_fraction = 0.25          # fractional Kelly multiplier
+max_stake_pct = 0.02           # hard cap per bet, as a fraction of bankroll
+min_ev = 0.03                  # hide edges below +3% EV on the board
+max_odds = 6.0                 # hide prices above this by default (model least reliable)
+devig_method = "power"         # multiplicative | power | shin
+# Sharp "true price" references, in priority order. Pinnacle closing is primary;
+# Betfair Exchange is the fallback where Pinnacle is missing.
+reference_books = ["pinnacle", "betfair_ex_uk"]
+betfair_commission = 0.05      # set to your actual Betfair rate; applied before comparing prices
+
+[markets]
+enabled = ["1X2", "OU_2.5"]    # Phase 1. Next: AH, then BTTS.
+
+[ingest.football_data_co_uk]
+base_url = "https://www.football-data.co.uk/mmz4281"
+backfill_from = "2015-16"
+current_season = "2026-27"
+refresh_current_hours = 12     # completed seasons are downloaded once and cached forever
+request_delay_seconds = 2.0    # be polite: one request every 2s at most
+cache_dir = "data/raw/football_data_co_uk"
+
+[ingest.the_odds_api]            # Phase 1 task P1.1-7 (not built yet)
+regions = "uk"
+markets = "h2h,totals"
+monthly_credit_budget = 500     # free tier; the poller must stay under this
+cache_dir = "data/raw/the_odds_api"
+
+[ingest.football_data_org]       # Phase 1 task P1.1-6 (not built yet)
+request_delay_seconds = 6.5     # free tier is rate limited per minute
+cache_dir = "data/raw/football_data_org"
+
+[news]                           # Phase 2
+window_start_hours = 6
+rescore_at_hours = 3
+llm_model = "claude-haiku-5-5"
+
+[alerts]                         # Phase 2
+channel = "telegram"
