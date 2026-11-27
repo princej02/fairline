@@ -86,7 +86,8 @@ class FootballDataCoUkSettings(BaseModel):
 class TheOddsApiSettings(BaseModel):
     base_url: str
     markets: str
-    competitions: list[str]
+    competitions: list[str]  # paid odds polls
+    fixture_competitions: list[str] = Field(default_factory=list)  # free /events sync (superset)
     monthly_credit_budget: int = Field(gt=0)
     reserve_credits: int = Field(ge=0)
     burst_days: float = Field(ge=0, le=31)
@@ -104,6 +105,15 @@ class TheOddsApiSettings(BaseModel):
         if self.close_max_age_minutes < self.close_window_minutes + self.tick_minutes:
             raise ValueError("close_max_age_minutes must cover close_window_minutes + one tick")
         return self
+
+
+class FootballDataOrgSettings(BaseModel):
+    base_url: str
+    competitions: list[str]
+    request_delay_seconds: float = Field(ge=6.0, description="free tier: 10 requests/minute")
+    window_days_back: int = Field(ge=0)
+    window_days_ahead: int = Field(ge=0)
+    cache_dir: str
 
 
 class DixonColesSettings(BaseModel):
@@ -156,6 +166,10 @@ class Settings(BaseModel):
     @property
     def fdcuk(self) -> FootballDataCoUkSettings:
         return FootballDataCoUkSettings(**self.ingest["football_data_co_uk"])
+
+    @property
+    def fdorg(self) -> FootballDataOrgSettings:
+        return FootballDataOrgSettings(**self.ingest["football_data_org"])
 
     @property
     def odds_api(self) -> TheOddsApiSettings:
@@ -237,10 +251,18 @@ def load_config(root: Path | None = None) -> Config:
         if bad:
             raise ValueError(f"models.dixon_coles.pools.{pool} references non-allowlisted competitions: {bad}")
     if "the_odds_api" in settings.ingest:
-        for code in settings.odds_api.competitions:
+        oa = settings.odds_api
+        if not set(oa.competitions) <= set(oa.fixture_competitions or oa.competitions):
+            raise ValueError("ingest.the_odds_api.competitions must be a subset of fixture_competitions")
+        for code in [*oa.competitions, *oa.fixture_competitions]:
             if code not in competitions:
                 raise ValueError(f"ingest.the_odds_api.competitions: {code!r} is not allowlisted")
             competitions[code].provider_code("the_odds_api")  # raises NotAllowed if unmapped
+    if "football_data_org" in settings.ingest:
+        for code in settings.fdorg.competitions:
+            if code not in competitions:
+                raise ValueError(f"ingest.football_data_org.competitions: {code!r} is not allowlisted")
+            competitions[code].provider_code("football_data_org")
 
     return Config(root=root, settings=settings, competitions=competitions, bookmakers=bookmakers)
 

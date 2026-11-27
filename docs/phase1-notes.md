@@ -2,14 +2,65 @@
 
 Decisions and constraints to carry into the remaining Phase 1 tasks.
 
-## P1.1-6 Fixtures (football-data.org)
+## P1.1-6 Fixtures (football-data.org) (done)
 
-- The free tier (10 requests/minute) covers ENG1, ENG2 (Championship), ESP1, GER1, FRA1 and UCL,
-  but **not** Segunda, 2. Bundesliga or Ligue 2. `competitions.yaml` already has
-  `football_data_org: null` for those three.
-- Upcoming fixtures for ESP2, GER2 and FRA2 should come from The Odds API events list,
-  which we poll for odds anyway. That avoids a paid tier. Resolve team names through
-  `participant_alias` as usual.
+Code: `py/src/fairline/ingest/football_data_org/`, plus the shared name/event resolver
+`ingest/resolve.py`. Token: `FOOTBALL_DATA_ORG_TOKEN` in `.env` (free registration).
+
+```
+fairline fixtures season [--competition ENG1] [--season 2026-27]   # one request per competition
+fairline fixtures window                                            # yesterday..tomorrow
+fairline odds aliases --provider football_data_org                  # their unmapped names
+fairline odds alias --provider football_data_org add "X FC" "X"
+```
+Dagster: `fdo_season_daily` (05:15 London) and `fdo_window_15m`, both shipped stopped.
+
+**Coverage.**
+- The free tier (10 requests/minute, no monthly cap) covers ENG1, ENG2, ESP1, GER1, FRA1 and
+  UCL. It does not cover ESP2, GER2 or FRA2.
+- Fixtures for those three come from The Odds API's free `/events` list instead.
+  `ingest.the_odds_api.fixture_competitions` lists all 8 leagues for that free sync, while paid
+  odds polls stay on `competitions`, the top 4.
+
+**What it adds over the other sources.**
+- The full season's fixture list. The Odds API only lists about the next two weeks.
+- Kickoff changes, postponements (`postponed`) and cancellations (`void`). The tracker already
+  settles a leg on a void event as void.
+- Results within one 15-minute window of full time. football-data.co.uk's CSV lags by a day or
+  two, so tracked bets now settle the same evening.
+
+**Rules.**
+- Football-data.org is authoritative for kickoff and status. It may move a postponed fixture's
+  date. A finished event only changes status if it is cancelled.
+- `SCHEDULED` (date known, time not) sets `kickoff_time_known = false`. `TIMED` sets it true.
+- Results settle on 90 minutes. When a tie goes to extra time, `score.regularTime` is used,
+  never `fullTime`.
+- Its results are stored with source `football_data_org`. It never overwrites a
+  football-data.co.uk result, which carries match stats. When the two scores differ, the sync
+  reports it rather than resolving it. A later football-data.co.uk load supersedes its rows and
+  links to its events instead of duplicating them.
+- Team names go through the same conservative matcher as The Odds API. It tries their short
+  name ("Man United") before the full name ("Manchester United FC").
+
+**First live run (2026-11-27, The Odds API, free calls only).**
+- The free sync found 123 upcoming fixtures across the 8 leagues.
+- 83 names auto-matched, all checked by eye. Reserve sides resolved correctly ("Real Sociedad B"
+  -> "Sociedad B", not "Sociedad").
+- 13 names were mapped by hand:
+  - Atlético -> Ath Madrid
+  - Espanyol -> Espanol
+  - Paris FC and PSG (each blocked the other from auto-matching, as designed)
+  - M'gladbach
+  - Ein Frankfurt
+  - Hamburg
+  - QPR
+  - Wolves
+  - Celta Fortuna -> Celta B (the reserve side, not Celta)
+  - Sp Gijon
+  - Karlsruhe
+  - Laval
+- `fairline odds budget` on the real fixture list: 112 credits for the next 7 days (EPL midweek
+  round), about 486 a month, inside the 500 credits.
 
 ## P1.1-7 Live odds poller (The Odds API) (done)
 

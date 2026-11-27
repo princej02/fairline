@@ -52,7 +52,8 @@ cache_dir = "data/raw/football_data_co_uk"
 # Bet365 is not on The Odds API (null in bookmakers.yaml); it stays historical-only.
 base_url = "https://api.the-odds-api.com/v4"
 markets = "h2h,totals"
-competitions = ["ENG1", "ESP1", "GER1", "FRA1"]   # top divisions only on the free tier (~390 credits/month simulated); add the second tiers after live CLV holds up
+fixture_competitions = ["ENG1", "ENG2", "ESP1", "ESP2", "GER1", "GER2", "FRA1", "FRA2"]  # free /events sync only
+competitions = ["ENG1", "ESP1", "GER1", "FRA1"]   # paid odds polls: top divisions only on the free tier (~390 credits/month simulated); add the second tiers after live CLV holds up
 monthly_credit_budget = 500     # free tier; the poller must stay under this
 reserve_credits = 10            # never spend the last few (manual checks, mistakes)
 burst_days = 7                  # window polls may run this many days of allowance ahead of an even
@@ -66,8 +67,16 @@ events_refresh_hours = 6        # free /events fixture list, cached
 tick_minutes = 5                # scheduler cadence
 cache_dir = "data/raw/the_odds_api"
 
-[ingest.football_data_org]       # Phase 1 task P1.1-6 (not built yet)
-request_delay_seconds = 6.5     # free tier is rate limited per minute
+[ingest.football_data_org]       # Phase 1 task P1.1-6. Token: FOOTBALL_DATA_ORG_TOKEN in .env
+# Free tier: 10 requests/minute, no monthly cap. Covers ENG1, ENG2, ESP1, GER1, FRA1 (and UCL);
+# not ESP2/GER2/FRA2, whose fixtures come from The Odds API's free /events list instead.
+# Source of: the full season fixture list, kickoff changes, postponements/cancellations, and
+# results within minutes of full time (football-data.co.uk's CSV lags by a day or two).
+base_url = "https://api.football-data.org/v4"
+competitions = ["ENG1", "ENG2", "ESP1", "GER1", "FRA1"]
+request_delay_seconds = 6.5     # stays under 10/minute
+window_days_back = 1            # the rolling sync covers [today - back, today + ahead]
+window_days_ahead = 1
 cache_dir = "data/raw/football_data_org"
 
 [news]                           # Phase 2

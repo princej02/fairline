@@ -234,7 +234,8 @@ def sync_all(
     now = now or datetime.now(UTC)
     client = client or make_client(config)
     out = []
-    for c in config.settings.odds_api.competitions:
+    s = config.settings.odds_api
+    for c in s.fixture_competitions or s.competitions:
         try:
             data = client.events(config.competition(c).provider_code(PROVIDER), force=force).data
         except OddsApiError as e:
@@ -325,13 +326,15 @@ def tick(
     client = client or make_client(config)
     rep = TickReport(now)
     by_sport = {config.competition(c).provider_code(PROVIDER): c for c in s.competitions}
-    for sport, comp in by_sport.items():
+    fixture_only = {config.competition(c).provider_code(PROVIDER): c for c in s.fixture_competitions} | by_sport
+    for sport, comp in fixture_only.items():
         try:
             ev = client.events(sport)
         except OddsApiError as e:
             rep.warnings.append(f"{comp} fixtures: {e}")
             continue
-        rep.fixtures[sport] = [f for f in to_fixtures(ev.data) if f.commence > now]
+        if sport in by_sport:  # only paid-poll leagues are planned; the rest are synced for free
+            rep.fixtures[sport] = [f for f in to_fixtures(ev.data) if f.commence > now]
         if not ev.from_cache and not dry_run:  # fresh list (every events_refresh_hours): free name/event sync
             sr = sync_fixtures(conn, config, comp, ev.data, now)
             rep.syncs.append(sr)

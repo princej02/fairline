@@ -3,6 +3,7 @@
 fairline db migrate
 fairline ingest fdcuk --competition ENG1 --season 2024-25 [--force]
 fairline ingest fdcuk --backfill
+fairline fixtures season | window
 fairline odds sync | plan | poll [--dry-run] [--force ENG1] | close | budget | aliases | alias add NAME TEAM
 """
 
@@ -84,14 +85,25 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--force", action="append", default=[], metavar="COMP", help="poll this competition now")
     po.add_parser("close", help="mark closing prices for kicked-off events")
     po.add_parser("budget", help="credits used this month and a 7-day spend estimate")
-    po.add_parser("aliases", help="team names waiting for review, and unreviewed auto-matches")
-    pa = po.add_parser("alias").add_subparsers(dest="alias_action", required=True)
+    pal = po.add_parser("aliases", help="team names waiting for review, and unreviewed auto-matches")
+    pal.add_argument("--provider", default="the_odds_api", choices=["the_odds_api", "football_data_org"])
+    pa_ = po.add_parser("alias")
+    pa_.add_argument("--provider", default="the_odds_api", choices=["the_odds_api", "football_data_org"])
+    pa = pa_.add_subparsers(dest="alias_action", required=True)
     paa = pa.add_parser("add", help="map a provider team name to one of our teams")
     paa.add_argument("name", help="the provider's spelling, e.g. 'Wolverhampton Wanderers'")
     paa.add_argument("team", help="our team name, e.g. 'Wolves'")
     paa.add_argument("--new", action="store_true", help="create the team if we have never seen it")
     pao = pa.add_parser("ok", help="mark an auto-matched name as reviewed")
     pao.add_argument("name")
+
+    pf = sub.add_parser("fixtures", help="football-data.org fixtures, status and results (P1.1-6)")
+    pfs = pf.add_subparsers(dest="action", required=True)
+    fs = pfs.add_parser("season", help="whole-season fixture list, one request per competition")
+    fs.add_argument("--competition", action="append", help="default: ingest.football_data_org.competitions")
+    fs.add_argument("--season", help="e.g. 2026-27 (default: current)")
+    fw = pfs.add_parser("window", help="yesterday..tomorrow: kickoff moves, postponements, fresh results")
+    fw.add_argument("--competition", action="append")
 
     args = p.parse_args(argv)
     config = get_config()
@@ -102,6 +114,32 @@ def main(argv: list[str] | None = None) -> int:
             db.sync_reference(conn, config)
             print(f"applied: {applied or 'nothing new'}; reference tables synced")
             return 0
+
+        if args.cmd == "fixtures":
+            from fairline.ingest.football_data_org import sync as fdo
+
+            if args.action == "season":
+                rows = fdo.sync_season(conn, config, comps=args.competition, season=args.season)
+            else:
+                rows = fdo.sync_window(conn, config, comps=args.competition)
+            for r in rows:
+                if r.error:
+                    print(f"  {r.competition:<5} {r.mode:<16} FAILED {r.error}")
+                    continue
+                print(f"  {r.competition:<5} {r.mode:<16} {r.matches} matches, {r.events} matched "
+                      f"(+{r.created} new, {r.linked} linked), {r.status_changes} status / {r.kickoff_changes} kickoff "
+                      f"changes, {r.results} results")  # fmt: skip
+                for n, ours in r.auto_matched.items():
+                    print(f"        auto-matched {n!r} -> {ours!r}")
+                if r.unresolved:
+                    print(
+                        f"        unresolved (skipped): {r.unresolved}  -> fairline odds aliases --provider football_data_org"
+                    )
+                for d in r.disagreements:
+                    print(f"        SCORE DISAGREEMENT {d}")
+                for w in r.warnings:
+                    print(f"        warning: {w}")
+            return 1 if any(r.error for r in rows) else 0
 
         if args.cmd == "odds":
             from fairline.ingest.the_odds_api import cli as odds_cli

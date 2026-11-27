@@ -116,8 +116,59 @@ def odds_tick_schedule(context: ScheduleEvaluationContext):
     return RunRequest(run_key=f"odds:{context.scheduled_execution_time:%Y%m%d%H%M}")
 
 
+# ---------------------------------------------------------------- fixtures (P1.1-6)
+from fairline.ingest.football_data_org.sync import sync_season, sync_window  # noqa: E402
+
+
+def _log_fdo(context: OpExecutionContext, rows) -> dict:
+    for r in rows:
+        if r.error:
+            context.log.warning(f"{r.competition} {r.mode}: {r.error}")
+        for d in r.disagreements:
+            context.log.warning(f"{r.competition}: score disagreement {d}")
+        if r.unresolved:
+            context.log.warning(f"{r.competition}: unmapped team names {r.unresolved}")
+    return {r.competition: {"matches": r.matches, "results": r.results, "error": r.error} for r in rows}
+
+
+@op
+def fdo_season_sync(context: OpExecutionContext) -> dict:
+    """Whole-season fixture lists from football-data.org (one request per competition)."""
+    with db.connect() as conn:
+        return _log_fdo(context, sync_season(conn, get_config()))
+
+
+@op
+def fdo_window_sync(context: OpExecutionContext) -> dict:
+    """Yesterday..tomorrow: kickoff moves, postponements, live status, results minutes after FT."""
+    with db.connect() as conn:
+        return _log_fdo(context, sync_window(conn, get_config()))
+
+
+@job
+def fdo_season_job():
+    fdo_season_sync()
+
+
+@job
+def fdo_window_job():
+    fdo_window_sync()
+
+
+@schedule(job=fdo_season_job, cron_schedule="15 5 * * *", execution_timezone="Europe/London",
+          default_status=DefaultScheduleStatus.STOPPED)  # fmt: skip
+def fdo_season_daily(context: ScheduleEvaluationContext):
+    return RunRequest(run_key=f"fdo-season:{context.scheduled_execution_time:%Y%m%d}")
+
+
+@schedule(job=fdo_window_job, cron_schedule="*/15 * * * *", execution_timezone="UTC",
+          default_status=DefaultScheduleStatus.STOPPED)  # fmt: skip
+def fdo_window_15m(context: ScheduleEvaluationContext):
+    return RunRequest(run_key=f"fdo-window:{context.scheduled_execution_time:%Y%m%d%H%M}")
+
+
 defs = Definitions(
     assets=[fdcuk_season, dixon_coles_walkforward],
-    jobs=[fdcuk_job, odds_tick_job],
-    schedules=[fdcuk_current_season_daily, odds_tick_schedule],
+    jobs=[fdcuk_job, odds_tick_job, fdo_season_job, fdo_window_job],
+    schedules=[fdcuk_current_season_daily, odds_tick_schedule, fdo_season_daily, fdo_window_15m],
 )

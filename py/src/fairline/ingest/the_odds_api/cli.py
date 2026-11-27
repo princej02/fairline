@@ -100,7 +100,7 @@ def run(conn: psycopg.Connection, config: Config, args) -> int:
         rows = conn.execute(
             "SELECT alias, competition, candidates, times_seen, last_seen FROM participant_alias_review "
             "WHERE provider = %s ORDER BY competition, alias",
-            (PROVIDER,),
+            (args.provider,),
         ).fetchall()
         print(f"{len(rows)} unresolved (their fixtures are skipped until mapped):")
         for a, comp, cands, n, last in rows:
@@ -108,7 +108,7 @@ def run(conn: psycopg.Connection, config: Config, args) -> int:
         auto = conn.execute(
             "SELECT a.alias, p.name FROM participant_alias a JOIN participant p ON p.id = a.participant_id "
             "WHERE a.provider = %s AND NOT a.reviewed ORDER BY a.alias",
-            (PROVIDER,),
+            (args.provider,),
         ).fetchall()
         print(f"{len(auto)} auto-matched, not yet reviewed (`fairline odds alias ok NAME` once checked):")
         for a, n in auto:
@@ -119,7 +119,7 @@ def run(conn: psycopg.Connection, config: Config, args) -> int:
         if args.alias_action == "ok":
             n = conn.execute(
                 "UPDATE participant_alias SET reviewed = true WHERE provider = %s AND sport_id = %s AND alias = %s",
-                (PROVIDER, sid, args.name),
+                (args.provider, sid, args.name),
             ).rowcount
             conn.commit()
             print("marked reviewed" if n else "no such alias")
@@ -141,11 +141,11 @@ def run(conn: psycopg.Connection, config: Config, args) -> int:
         conn.execute(
             "INSERT INTO participant_alias (provider, sport_id, alias, participant_id, reviewed) VALUES (%s, %s, %s, %s, true) "
             "ON CONFLICT (provider, sport_id, alias) DO UPDATE SET participant_id = EXCLUDED.participant_id, reviewed = true",
-            (PROVIDER, sid, args.name, pid),
+            (args.provider, sid, args.name, pid),
         )
         conn.execute(
             "DELETE FROM participant_alias_review WHERE provider = %s AND sport_id = %s AND alias = %s",
-            (PROVIDER, sid, args.name),
+            (args.provider, sid, args.name),
         )
         conn.commit()
         print(f"{args.name!r} -> {args.team!r}; its fixtures are picked up on the next poll")
