@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def repo_root() -> Path:
@@ -83,6 +83,29 @@ class FootballDataCoUkSettings(BaseModel):
     cache_dir: str
 
 
+class TheOddsApiSettings(BaseModel):
+    base_url: str
+    markets: str
+    competitions: list[str]
+    monthly_credit_budget: int = Field(gt=0)
+    reserve_credits: int = Field(ge=0)
+    pace_slack: float = Field(ge=0, le=1)
+    warn_at: float = Field(gt=0, le=1)
+    poll_windows_hours: list[float]
+    window_tolerance_share: float = Field(ge=0, lt=1)
+    close_window_minutes: float = Field(gt=0)
+    close_max_age_minutes: float = Field(gt=0)
+    events_refresh_hours: float = Field(gt=0)
+    tick_minutes: float = Field(gt=0)
+    cache_dir: str
+
+    @model_validator(mode="after")
+    def _close_after_window(self):
+        if self.close_max_age_minutes < self.close_window_minutes + self.tick_minutes:
+            raise ValueError("close_max_age_minutes must cover close_window_minutes + one tick")
+        return self
+
+
 class DixonColesSettings(BaseModel):
     max_goals: int = Field(ge=10, description="grid must cover at least 0-10 goals per side")
     half_life_days: float = Field(gt=0)
@@ -134,6 +157,10 @@ class Settings(BaseModel):
     def fdcuk(self) -> FootballDataCoUkSettings:
         return FootballDataCoUkSettings(**self.ingest["football_data_co_uk"])
 
+    @property
+    def odds_api(self) -> TheOddsApiSettings:
+        return TheOddsApiSettings(**self.ingest["the_odds_api"])
+
 
 _SEASON_RE = re.compile(r"^(\d{4})-(\d{2})$")
 
@@ -148,6 +175,12 @@ def season_start_year(label: str) -> int:
 def season_range(first: str, last: str) -> list[str]:
     a, b = season_start_year(first), season_start_year(last)
     return [f"{y}-{(y + 1) % 100:02d}" for y in range(a, b + 1)]
+
+
+def season_label_for(d) -> str:
+    """European football season of a date: July-June. date(2026, 8, 1) -> '2026-27'."""
+    y = d.year if d.month >= 7 else d.year - 1
+    return f"{y}-{(y + 1) % 100:02d}"
 
 
 class Config(BaseModel):
@@ -203,6 +236,11 @@ def load_config(root: Path | None = None) -> Config:
         bad = [c for c in codes if c not in competitions]
         if bad:
             raise ValueError(f"models.dixon_coles.pools.{pool} references non-allowlisted competitions: {bad}")
+    if "the_odds_api" in settings.ingest:
+        for code in settings.odds_api.competitions:
+            if code not in competitions:
+                raise ValueError(f"ingest.the_odds_api.competitions: {code!r} is not allowlisted")
+            competitions[code].provider_code("the_odds_api")  # raises NotAllowed if unmapped
 
     return Config(root=root, settings=settings, competitions=competitions, bookmakers=bookmakers)
 

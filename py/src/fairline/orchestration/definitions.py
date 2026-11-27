@@ -77,8 +77,47 @@ def dixon_coles_walkforward(context: AssetExecutionContext) -> MaterializeResult
     return MaterializeResult(metadata=out)
 
 
+# ---------------------------------------------------------------- live odds (P1.1-7)
+from dagster import DefaultScheduleStatus, OpExecutionContext, job, op  # noqa: E402
+
+from fairline.ingest.the_odds_api.poll import tick  # noqa: E402
+
+_odds = _cfg.settings.odds_api
+
+
+@op
+def odds_tick(context: OpExecutionContext) -> dict:
+    """Plan -> budget check -> poll -> mark closing. Free fixture calls every tick; paid calls only
+    when a fixture enters a window (see ingest/the_odds_api/planner.py)."""
+    with db.connect() as conn:
+        rep = tick(conn, get_config())
+    for w in rep.warnings:
+        context.log.warning(w)
+    for r in rep.polls:
+        msg = f"{r.competition} {r.kind} {r.status} {r.reason} credits={r.credits} snapshots={r.snapshots}"
+        (context.log.warning if r.status in ("failed", "skipped") or r.unresolved else context.log.info)(
+            msg + (f" unresolved={r.unresolved}" if r.unresolved else "")
+        )
+    return {"spent": rep.spent, "remaining": rep.remaining, "polls": len(rep.polls), "closing": rep.closing}
+
+
+@job
+def odds_tick_job():
+    odds_tick()
+
+
+@schedule(
+    job=odds_tick_job,
+    cron_schedule=f"*/{int(_odds.tick_minutes)} * * * *",
+    execution_timezone="UTC",
+    default_status=DefaultScheduleStatus.STOPPED,  # turning it on is the decision to spend credits
+)
+def odds_tick_schedule(context: ScheduleEvaluationContext):
+    return RunRequest(run_key=f"odds:{context.scheduled_execution_time:%Y%m%d%H%M}")
+
+
 defs = Definitions(
     assets=[fdcuk_season, dixon_coles_walkforward],
-    jobs=[fdcuk_job],
-    schedules=[fdcuk_current_season_daily],
+    jobs=[fdcuk_job, odds_tick_job],
+    schedules=[fdcuk_current_season_daily, odds_tick_schedule],
 )

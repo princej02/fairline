@@ -11,26 +11,73 @@ Decisions and constraints to carry into the remaining Phase 1 tasks.
   which we poll for odds anyway. That avoids a paid tier. Resolve team names through
   `participant_alias` as usual.
 
-## P1.1-7 Live odds (The Odds API) - notes for when it is built
+## P1.1-7 Live odds poller (The Odds API) (done)
 
-- Billing: each `/odds` call costs `markets x regions` credits; `/events` and `/sports` are free.
-  Pinnacle is only in the `eu` region, so `uk,eu` x `h2h,totals` = 4 credits per league per poll.
-  Use `bookmakers=` instead (every 10 books bill as one region): 2 credits. Build the list from
-  `Config.provider_books("the_odds_api")`: Pinnacle, Betfair Exchange, Sky Bet, William Hill and
-  Paddy Power. Bet365 is not carried by The Odds API, so it is left out (no wasted slot, no
-  missing-row alarms). It stays historical-only via football-data.co.uk, so live Bet365 prices
-  can't appear on the board; it stays bettable and you can still log Bet365 bets by hand. A paid UK
-  aggregator (Odds-API.io, TheStatsAPI) would carry Bet365 and Pinnacle in one feed if that's ever
-  worth paying for. Re-check the remaining keys against `/sports/{sport}/odds` on the first live run.
-- Budget: 500 credits/month over 8 leagues at 2 credits is ~31 polls per league per month. Poll each
-  league only on matchdays, once ~T-24h and once ~T-3h (the news re-score), plus a closing grab at
-  kickoff; skip leagues with no fixture in the window (from the free `/events` call).
-- Log `x-requests-remaining` and `x-requests-used` from every response into `ingestion_run`, refuse
-  to poll when the projected month-end spend exceeds `monthly_credit_budget`, and alert (Phase 2
-  Telegram) at 80%.
-- Cache every response body on disk before parsing, as the football-data.co.uk source does.
-- Live snapshots carry a real `ts` (the API's `last_update`), so `ts_estimated = false` and the
-  tracker's execution edge stops depending on the kickoff-2h estimate.
+Code: `py/src/fairline/ingest/the_odds_api/`. Key: `THE_ODDS_API_KEY` in `.env`.
+
+```
+fairline odds plan                 # what the next tick would poll and why (free calls only)
+fairline odds budget               # credits this month + 7-day estimate from the free fixture list
+fairline odds poll [--dry-run] [--force ENG1]
+fairline odds aliases              # names waiting for review / auto-matches to eyeball
+fairline odds alias add "Wolverhampton Wanderers" Wolves [--new]
+fairline odds alias ok "Manchester United"
+```
+Dagster: `odds_tick_schedule` every 5 minutes, shipped **stopped**. Turning it on is the
+decision to spend credits.
+
+- **Cost.** `/odds` costs markets x regions. We send `bookmakers=` (10 books = 1 region) from
+  `Config.provider_books`: Pinnacle, Betfair Exchange, Sky Bet, William Hill and Paddy Power.
+  That is 2 credits a call. Bet365 is not carried, so it is never requested; it stays
+  historical-only via football-data.co.uk. `/events` is free and cached for 6h.
+- **When.** One call returns a whole league, so the planner decides per league. It polls when a
+  fixture enters T-24h, T-3h (the news re-score) or the close window (T-20m). Two rules let one
+  poll serve several jobs:
+  - A window counts as covered by a poll up to a third of its length early.
+  - A window poll waits for a closing poll due within that tolerance.
+
+  Simulated typical weekend, two kickoffs 2.5h apart: 4 polls instead of 6.
+- **Budget, checked before every paid call.**
+  - The API's `x-requests-remaining` must stay above `reserve_credits`.
+  - Our own monthly ledger must stay under the cap.
+  - Pacing: anything more than 10% ahead of an even monthly spend gets close polls only. Closing
+    prices are what CLV needs, so they are the last thing dropped.
+  - Every paid call is an `ingestion_run` row holding its credits, the remaining balance, the poll
+    time and which books priced which event.
+- **Honest numbers.** A simulated typical weekend across all 8 leagues needs ~168 credits, about
+  730 a month. Closing polls alone are ~420 a month, which is about what the free 500 covers. So
+  with all 8 leagues on, pacing will mostly drop the T-24h/T-3h polls. Trim
+  `ingest.the_odds_api.competitions`, or pay for a bigger tier, to keep those windows.
+- **Timestamps.**
+  - A snapshot's `ts` is the market's `last_update`, capped at the poll time, with
+    `ts_estimated = false`.
+  - Anything stamped at or after kickoff is dropped. `commenceTimeFrom=now` keeps in-play events
+    out of the response anyway.
+  - The in-play check runs before the clamp, so a skewed stamp cannot sneak through. A test caught
+    this.
+- **Closing.**
+  - After kickoff, each book's latest price from a poll made within 30 minutes of kickoff is copied
+    as `is_closing`, with `ts` set to that poll time.
+  - Books missing from that poll get no close.
+  - An event with no poll near kickoff gets no close at all: a T-3h price is not a close.
+- **Names and events.**
+  - football-data.co.uk spellings stay canonical.
+  - A provider name auto-matches only on an exact normalised match, or a unique token-subset match
+    against teams from the country's last three seasons. Normalising handles Man/Manchester,
+    Nott'm, St/Saint, accents and FC/AFC.
+  - Two names never share a team.
+  - Everything else goes to `participant_alias_review`, and that fixture is skipped. A wrong match
+    would put prices on the wrong team, which is worse than a missing match.
+  - League fixtures match on (season, home, away). football-data.co.uk's loader now links to an
+    event the poller created instead of duplicating it.
+- **Secrets.** httpx request logging is silenced, since it prints the URL and so the `apiKey`.
+  Errors are rebuilt without the URL, and cache metadata omits the key. Tests check all three.
+- **Not done here.**
+  - Live predictions for upcoming fixtures (the model only scores past matchdays so far), and so a
+    live board.
+  - football-data.org fixtures (P1.1-6).
+  - Telegram budget alerts (Phase 2); today it logs a warning at 80%.
+  - Verifying the bookmaker keys and names against the real API, which needs the key.
 
 ## P1.2 Model (done)
 

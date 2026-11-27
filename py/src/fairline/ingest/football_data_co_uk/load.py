@@ -23,6 +23,7 @@ class LoadStats:
     teams_created: int = 0
     events_created: int = 0
     events_updated: int = 0
+    events_linked: int = 0  # fixtures a live source created first
     results_upserted: int = 0
     odds_inserted: int = 0
 
@@ -117,16 +118,35 @@ def _upsert_events(conn, season_id: int, events: pl.DataFrame, team_ids: dict[st
             stats.events_updated += cur.rowcount
             out[ext] = existing[ext]
         else:
-            eid = conn.execute(
-                "INSERT INTO event (season_id, starts_at, kickoff_time_known, home_id, away_id, status) "
-                "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-                (season_id, *args),
-            ).fetchone()[0]
+            # A live source (The Odds API) may have created this fixture before it was played.
+            # A league season has one Home v Away game, so link to it instead of duplicating.
+            linked = conn.execute(
+                """
+                SELECT e.id FROM event e
+                WHERE e.season_id = %s AND e.home_id = %s AND e.away_id = %s
+                  AND NOT EXISTS (SELECT 1 FROM event_external_id x WHERE x.event_id = e.id AND x.provider = %s)
+                """,
+                (season_id, args[2], args[3], PROVIDER),
+            ).fetchone()
+            if linked:
+                eid = linked[0]
+                conn.execute(
+                    "UPDATE event SET starts_at = %s, kickoff_time_known = %s, home_id = %s, away_id = %s, "
+                    "status = %s, updated_at = now() WHERE id = %s",
+                    (*args, eid),
+                )
+                stats.events_linked += 1
+            else:
+                eid = conn.execute(
+                    "INSERT INTO event (season_id, starts_at, kickoff_time_known, home_id, away_id, status) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+                    (season_id, *args),
+                ).fetchone()[0]
+                stats.events_created += 1
             conn.execute(
                 "INSERT INTO event_external_id (provider, external_id, event_id) VALUES (%s, %s, %s)",
                 (PROVIDER, ext, eid),
             )
-            stats.events_created += 1
             out[ext] = eid
     return out
 

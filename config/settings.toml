@@ -44,15 +44,25 @@ refresh_current_hours = 12     # completed seasons are downloaded once and cache
 request_delay_seconds = 2.0    # be polite: one request every 2s at most
 cache_dir = "data/raw/football_data_co_uk"
 
-[ingest.the_odds_api]            # Phase 1 task P1.1-7 (not built yet)
+[ingest.the_odds_api]            # Phase 1 task P1.1-7. Key: THE_ODDS_API_KEY in .env
 # Cost per /odds call = markets x regions credits; /events and /sports are free. Pinnacle is in the
 # "eu" region, not "uk", so regions="uk,eu" would cost 4 credits per league per poll. Passing
 # `bookmakers=` instead bills each group of 10 books as one region: 2 credits per call.
-# The poller sends `bookmakers` from Config.provider_books("the_odds_api") and ignores `regions`.
+# The poller sends `bookmakers` from Config.provider_books("the_odds_api").
 # Bet365 is not on The Odds API (null in bookmakers.yaml); it stays historical-only.
-regions = "uk"
+base_url = "https://api.the-odds-api.com/v4"
 markets = "h2h,totals"
+competitions = ["ENG1", "ENG2", "ESP1", "ESP2", "GER1", "GER2", "FRA1", "FRA2"]
 monthly_credit_budget = 500     # free tier; the poller must stay under this
+reserve_credits = 10            # never spend the last few (manual checks, mistakes)
+pace_slack = 0.10               # ahead of the month's pace by more than this -> close polls only
+warn_at = 0.80                  # warn when this share of the month's budget is used
+poll_windows_hours = [24, 3]    # poll a league once each fixture enters these windows (3h = news re-score)
+window_tolerance_share = 0.34   # a poll up to this share of a window early covers it (T-24h <- T-32h)
+close_window_minutes = 20       # closing poll this long before kickoff
+close_max_age_minutes = 30      # a snapshot only counts as closing if polled this close to kickoff
+events_refresh_hours = 6        # free /events fixture list, cached
+tick_minutes = 5                # scheduler cadence
 cache_dir = "data/raw/the_odds_api"
 
 [ingest.football_data_org]       # Phase 1 task P1.1-6 (not built yet)

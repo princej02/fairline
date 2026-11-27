@@ -3,6 +3,7 @@
 fairline db migrate
 fairline ingest fdcuk --competition ENG1 --season 2024-25 [--force]
 fairline ingest fdcuk --backfill
+fairline odds plan | poll [--dry-run] [--force ENG1] | close | budget | aliases | alias add NAME TEAM
 """
 
 from __future__ import annotations
@@ -72,6 +73,24 @@ def main(argv: list[str] | None = None) -> int:
     bb.add_argument("--pools", default="ENG,GER")
     bb.add_argument("--slates", type=int, default=12, help="slates per pool")
 
+    po = sub.add_parser("odds", help="live odds from The Odds API (P1.1-7)").add_subparsers(
+        dest="action", required=True
+    )
+    po.add_parser("plan", help="what the next tick would poll and why (free calls only)")
+    pp = po.add_parser("poll", help="run one scheduler tick: plan, budget check, poll, mark closing")
+    pp.add_argument("--dry-run", action="store_true", help="free fixture calls only; spend nothing")
+    pp.add_argument("--force", action="append", default=[], metavar="COMP", help="poll this competition now")
+    po.add_parser("close", help="mark closing prices for kicked-off events")
+    po.add_parser("budget", help="credits used this month and a 7-day spend estimate")
+    po.add_parser("aliases", help="team names waiting for review, and unreviewed auto-matches")
+    pa = po.add_parser("alias").add_subparsers(dest="alias_action", required=True)
+    paa = pa.add_parser("add", help="map a provider team name to one of our teams")
+    paa.add_argument("name", help="the provider's spelling, e.g. 'Wolverhampton Wanderers'")
+    paa.add_argument("team", help="our team name, e.g. 'Wolves'")
+    paa.add_argument("--new", action="store_true", help="create the team if we have never seen it")
+    pao = pa.add_parser("ok", help="mark an auto-matched name as reviewed")
+    pao.add_argument("name")
+
     args = p.parse_args(argv)
     config = get_config()
 
@@ -81,6 +100,15 @@ def main(argv: list[str] | None = None) -> int:
             db.sync_reference(conn, config)
             print(f"applied: {applied or 'nothing new'}; reference tables synced")
             return 0
+
+        if args.cmd == "odds":
+            from fairline.ingest.the_odds_api import cli as odds_cli
+
+            try:
+                return odds_cli.run(conn, config, args)
+            except NotAllowed as e:
+                print(f"refused: {e}", file=sys.stderr)
+                return 2
 
         if args.cmd == "backtest":
             pools = [x.strip() for x in args.pools.split(",")]
