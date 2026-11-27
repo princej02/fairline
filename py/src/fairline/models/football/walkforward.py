@@ -127,3 +127,31 @@ def walk_forward(
 
     preds = pl.DataFrame(rows) if rows else pl.DataFrame()
     return WalkForwardResult(predictions=preds, fits=fits, config_hash=config_hash(s))
+
+
+def score_live(
+    matches: pl.DataFrame,
+    pool_name: str,
+    pool: list[str],
+    s: DixonColesSettings,
+    now: datetime,
+    horizon: timedelta,
+    init: dict[str, dc.DixonColesParams] | None = None,
+) -> WalkForwardResult:
+    """One fit per group with the training cutoff at `now`, scoring every unplayed fixture kicking
+    off in (now, now + horizon]. as_of = now, so these predictions are used for any decision made
+    from now on, and tomorrow's run (with tonight's results) supersedes them."""
+    groups = fit_groups(pool_name, pool, s)
+    fits: list[Fit] = []
+    rows: list[dict] = []
+    for g, comps in groups.items():
+        frame = matches.filter(pl.col("competition").is_in(comps))
+        upcoming = frame.filter(
+            (pl.col("starts_at") > now) & (pl.col("starts_at") <= now + horizon) & pl.col("home_goals").is_null()
+        )
+        if upcoming.is_empty():
+            continue
+        params = dc.fit(frame, now, s, init=(init or {}).get(g))
+        fits.append(Fit(g, now, params))
+        rows.extend(predict_matches(params, upcoming, s, now))
+    return WalkForwardResult(pl.DataFrame(rows) if rows else pl.DataFrame(), fits, config_hash(s))

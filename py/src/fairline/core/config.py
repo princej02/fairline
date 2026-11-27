@@ -131,6 +131,7 @@ class DixonColesSettings(BaseModel):
 class WalkForwardSettings(BaseModel):
     burn_in_days: int = Field(ge=0)
     retrain_every_days: int = Field(gt=0)
+    live_horizon_hours: float = Field(default=72, ge=0)  # live scoring: fit at now, score kickoffs up to now + this
 
 
 class BayesSettings(BaseModel):
