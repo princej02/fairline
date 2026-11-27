@@ -51,8 +51,9 @@ class Bookmaker(BaseModel):
 
     code: str
     name: str
-    kind: Literal["book", "exchange", "aggregate"]
+    kind: Literal["book", "exchange", "aggregate", "derived"]
     is_sharp: bool
+    derived_from: str | None = None  # kind 'derived': the real book its prices are computed from
     providers: dict[str, str | None] = Field(default_factory=dict)
 
 
@@ -72,6 +73,13 @@ class EdgeSettings(BaseModel):
     conservative_quantile: float = Field(gt=0, lt=0.5)
     acca_max_legs: int = Field(ge=2)
     acca_max_combined_odds: float = Field(gt=1)
+    # reference book -> its derived pseudo-book (pinnacle -> pinnacle_derived). Filled from
+    # bookmakers.yaml at load. Live board and tracker treat each pair as one source and use the
+    # fresher snapshot; the backtester never loads derived books, so history cannot mix them.
+    derived_references: dict[str, str] = Field(default_factory=dict)
+
+    def live_quote_books(self) -> list[str]:
+        return sorted(set(self.reference_books) | set(self.bettable_books) | set(self.derived_references.values()))
 
 
 class FootballDataCoUkSettings(BaseModel):
@@ -99,6 +107,7 @@ class TheOddsApiSettings(BaseModel):
     events_refresh_hours: float = Field(gt=0)
     tick_minutes: float = Field(gt=0)
     cache_dir: str
+    derived_rho_default: float = Field(default=-0.03, ge=-0.3, le=0.3)  # when a league has no model fit yet
 
     @model_validator(mode="after")
     def _close_after_window(self):
@@ -209,13 +218,17 @@ class Config(BaseModel):
         except KeyError:
             raise NotAllowed(f"competition {code!r} is not in the allowlist (config/competitions.yaml)") from None
 
+    def derived_of(self, book: str) -> str | None:
+        """The derived pseudo-book computed from `book` (pinnacle -> pinnacle_derived), if any."""
+        return next((c for c, b in self.bookmakers.items() if b.derived_from == book), None)
+
     def provider_books(self, provider: str) -> dict[str, str]:
         """Our code -> the provider's key, for books that provider actually carries. A null mapping
         (e.g. Bet365 on The Odds API) means historical-only: never request it, never expect rows."""
         return {
             code: key
             for code, b in self.bookmakers.items()
-            if b.kind != "aggregate" and (key := b.providers.get(provider))
+            if b.kind in ("book", "exchange") and (key := b.providers.get(provider))
         }
 
     def competitions_for(self, provider: str, sport: str = "football") -> list[Competition]:
@@ -246,6 +259,13 @@ def load_config(root: Path | None = None) -> Config:
     unknown = (set(settings.edge.reference_books) | set(settings.edge.bettable_books)) - bookmakers.keys()
     if unknown:
         raise ValueError(f"edge reference/bettable books reference unknown bookmakers: {sorted(unknown)}")
+    for code, b in bookmakers.items():
+        if (b.kind == "derived") != (b.derived_from is not None) or (
+            b.derived_from and b.derived_from not in bookmakers
+        ):
+            raise ValueError(f"bookmaker {code}: kind 'derived' needs derived_from naming a real bookmaker")
+    if set(settings.edge.bettable_books) & {c for c, b in bookmakers.items() if b.kind == "derived"}:
+        raise ValueError("a derived price can be a reference, never a bettable book")
     for pool, codes in settings.models.dixon_coles.pools.items():
         bad = [c for c in codes if c not in competitions]
         if bad:
@@ -264,6 +284,11 @@ def load_config(root: Path | None = None) -> Config:
                 raise ValueError(f"ingest.football_data_org.competitions: {code!r} is not allowlisted")
             competitions[code].provider_code("football_data_org")
 
+    settings.edge.derived_references = {
+        b.derived_from: c
+        for c, b in bookmakers.items()
+        if b.kind == "derived" and b.derived_from in settings.edge.reference_books
+    }
     return Config(root=root, settings=settings, competitions=competitions, bookmakers=bookmakers)
 
 

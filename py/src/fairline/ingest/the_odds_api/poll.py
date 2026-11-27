@@ -17,6 +17,7 @@ import psycopg
 
 from fairline.core.config import Config
 from fairline.ingest.the_odds_api import budget as B
+from fairline.ingest.the_odds_api import derive as D
 from fairline.ingest.the_odds_api.client import OddsApiClient, OddsApiError
 from fairline.ingest.the_odds_api.parse import fixtures as to_fixtures
 from fairline.ingest.the_odds_api.parse import parse_events, parse_odds
@@ -106,6 +107,7 @@ class PollResult:
     remaining: int | None = None
     events: int = 0
     snapshots: int = 0
+    derived: int = 0  # events given a derived O/U reference
     created: int = 0
     linked: int = 0
     unresolved: list[str] = field(default_factory=list)
@@ -138,7 +140,8 @@ def poll_competition(
         return res
     res.credits = resp.usage.last if resp.usage.last is not None else B.call_cost(s.markets, len(books))
     res.remaining = resp.usage.remaining
-    parsed = parse_odds(resp.data, rev, ou_lines(config), resp.fetched_at)
+    pair = D.config_for(config)
+    parsed = parse_odds(resp.data, rev, ou_lines(config), resp.fetched_at, source_book=pair[0] if pair else None)
     with conn.transaction():
         sport_id, comp_id = conn.execute(
             "SELECT c.sport_id, c.id FROM competition c WHERE c.code = %s", (comp_code,)
@@ -159,6 +162,18 @@ def poll_competition(
         rows = [
             r | {"event_id": ext_to_event[r["external_id"]]} for r in parsed.rows if r["external_id"] in ext_to_event
         ]
+        derived_skipped: dict[str, int] = {}
+        if pair:
+            rho = D.latest_rho(conn, comp_code, s.derived_rho_default)
+            for target in sorted(ou_lines(config)):
+                d = D.derive_totals(
+                    parsed, ext_to_event, pair[0], pair[1], target, rho, config.settings.edge.devig_method
+                )
+                rows += d.rows
+                D.store_records(conn, sport_id, pair[1], pair[0], target, d.records)
+                res.derived += len(d.records)
+                for k, v in d.skipped.items():
+                    derived_skipped[k] = derived_skipped.get(k, 0) + v
         res.snapshots = _insert_snapshots(conn, sport_id, rows)
         res.events = len(ext_to_event)
         stats = {
@@ -172,6 +187,8 @@ def poll_competition(
             else str(resp.cache_path),
             "events": {str(ext_to_event[x]): sorted(b) for x, b in parsed.books_seen.items() if x in ext_to_event},
             "snapshots": res.snapshots,
+            "derived": res.derived,
+            "derived_skipped": derived_skipped,
             "unresolved": res.unresolved,
             "warnings": parsed.warnings[:50],
         }
@@ -290,6 +307,20 @@ def finalize_closing(conn: psycopg.Connection, config: Config, now: datetime, lo
             ON CONFLICT DO NOTHING
             """,
             (polled_at, PROVIDER, eid, PROVIDER, polled_at, list(books or [])),
+        )
+        conn.execute(
+            """
+            INSERT INTO odds_derivation (event_id, bookmaker_id, is_closing, ts, market_id, source_book_id, source_line,
+              source_over, source_under, lambda_home, lambda_away, rho, p_over, draw_fit_error, method)
+            SELECT DISTINCT ON (d.bookmaker_id, d.market_id) d.event_id, d.bookmaker_id, true, %s, d.market_id,
+                   d.source_book_id, d.source_line, d.source_over, d.source_under, d.lambda_home, d.lambda_away, d.rho,
+                   d.p_over, d.draw_fit_error, d.method
+            FROM odds_derivation d JOIN bookmaker b ON b.id = d.bookmaker_id
+            WHERE d.event_id = %s AND NOT d.is_closing AND d.ts <= %s AND b.code = ANY(%s)
+            ORDER BY d.bookmaker_id, d.market_id, d.ts DESC
+            ON CONFLICT DO NOTHING
+            """,
+            (polled_at, eid, polled_at, list(books or [])),
         )
         out["closed"] += 1
         out["rows"] += cur.rowcount

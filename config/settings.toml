@@ -65,6 +65,8 @@ close_window_minutes = 20       # closing poll this long before kickoff
 close_max_age_minutes = 30      # a snapshot only counts as closing if polled this close to kickoff
 events_refresh_hours = 6        # free /events fixture list, cached
 tick_minutes = 5                # scheduler cadence
+derived_rho_default = -0.03     # O/U 2.5 derived from Pinnacle's main line uses the league's latest
+                                # fitted Dixon-Coles rho; this only when a league has no fit yet
 cache_dir = "data/raw/the_odds_api"
 
 [ingest.football_data_org]       # Phase 1 task P1.1-6. Token: FOOTBALL_DATA_ORG_TOKEN in .env

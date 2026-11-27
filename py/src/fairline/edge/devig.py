@@ -144,3 +144,14 @@ def conservative(snap: Snapshot) -> dict[str, float] | None:
 def exchange_effective_odds(price: float, commission: float) -> float:
     """What a winning exchange back bet actually pays after commission on net winnings."""
     return 1 + (price - 1) * (1 - commission)
+
+
+def reference_fair(snap: Snapshot, method: str, derived: bool) -> FairPrices:
+    """Fair probabilities for a reference snapshot. A derived snapshot (e.g. pinnacle_derived) was
+    computed margin-free, so it is normalised, not devigged: devigging a price set that sums to 1
+    would trip the no-margin guard."""
+    if not derived:
+        return devig(snap, method)
+    sels = list(snap.prices)
+    q = np.array([1 / snap.prices[s] for s in sels])
+    return FairPrices("derived", dict(zip(sels, (q / q.sum()).tolist(), strict=True)), float(q.sum()), "ok")

@@ -22,7 +22,7 @@ import psycopg
 from fairline.backtest import metrics as M
 from fairline.backtest.data import outcome
 from fairline.core.config import Config
-from fairline.edge.devig import IncompleteMarket, Quote, Snapshot, devig, exchange_effective_odds
+from fairline.edge.devig import IncompleteMarket, Quote, Snapshot, exchange_effective_odds, reference_fair
 
 
 @dataclass
@@ -46,10 +46,47 @@ def _market_id(conn, market: str, line: float | None) -> int:
     return row[0]
 
 
-def reference_at(conn, config: Config, event_id: int, market: str, line: float | None, at: datetime, closing: bool):
-    """Devigged reference probabilities from the first reference book with a valid snapshot:
-    the latest one at or before `at`, or the closing one. Returns (book, probs, ts) or None."""
+@dataclass(frozen=True)
+class Ref:
+    book: str
+    probs: dict[str, float]
+    ts: datetime
+    source_line: float | None = None  # set when the book is a derived one (e.g. "derived from 3.0")
+
+    @property
+    def derived(self) -> bool:
+        return self.source_line is not None
+
+
+def _source_line(conn, event_id: int, book: str, ts: datetime, closing: bool) -> float | None:
+    row = conn.execute(
+        "SELECT d.source_line::float FROM odds_derivation d JOIN bookmaker b ON b.id = d.bookmaker_id "
+        "WHERE d.event_id = %s AND b.code = %s AND d.is_closing = %s AND d.ts = %s",
+        (event_id, book, closing, ts),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def reference_at(
+    conn,
+    config: Config,
+    event_id: int,
+    market: str,
+    line: float | None,
+    at: datetime,
+    closing: bool,
+    like: Ref | None = None,
+) -> Ref | None:
+    """Devigged reference probabilities: the latest snapshot at or before `at`, or the closing one.
+
+    A reference book and its derived twin (pinnacle / pinnacle_derived) count as one source; the
+    fresher snapshot wins, the quoted one on a tie. For closing lookups `like` (the placement
+    reference) enforces like-for-like CLV: a quoted placement reference only compares with a
+    quoted close, and a derived one only with a close derived from the same source line.
+    Otherwise a 0.5-1% line-translation residual could pass for CLV."""
     s = config.settings.edge
+    derived = s.derived_references
+    books = list(s.reference_books) + [derived[b] for b in s.reference_books if b in derived]
     rows = conn.execute(
         f"""
         SELECT b.code, o.selection, o.price::float, o.ts FROM odds_snapshot o
@@ -57,19 +94,38 @@ def reference_at(conn, config: Config, event_id: int, market: str, line: float |
         WHERE o.event_id = %s AND m.code = %s AND m.line IS NOT DISTINCT FROM %s AND b.code = ANY(%s)
           AND {"o.is_closing" if closing else "o.ts <= %s"}
         """,
-        (event_id, market, line, s.reference_books) + (() if closing else (at,)),
+        (event_id, market, line, books) + (() if closing else (at,)),
     ).fetchall()
     by: dict = defaultdict(list)
     for book, sel, price, ts in rows:
         by[(book, ts)].append(Quote(sel, price, ts, book))
-    for book in s.reference_books:
+
+    def best(book: str) -> Ref | None:
+        is_derived = book in derived.values()
         for ts in sorted((t for (b, t) in by if b == book), reverse=True):
             try:
-                fp = devig(Snapshot.validate(market, by[(book, ts)]), s.devig_method)
+                fp = reference_fair(Snapshot.validate(market, by[(book, ts)]), s.devig_method, derived=is_derived)
             except IncompleteMarket:
                 continue
             if fp.status == "ok":
-                return book, fp.probs, ts
+                src = _source_line(conn, event_id, book, ts, closing) if is_derived else None
+                if is_derived and src is None:
+                    continue  # a derived price without its provenance is unusable
+                return Ref(book, fp.probs, ts, src)
+        return None
+
+    for parent in s.reference_books:
+        quoted = best(parent)
+        twin = best(derived[parent]) if parent in derived else None
+        if closing and like is not None:
+            if like.derived:
+                if twin is not None and twin.source_line == like.source_line:
+                    return twin
+                continue
+            twin = None  # quoted placement reference: quoted closes only
+        cands = [r for r in (quoted, twin) if r is not None]
+        if cands:
+            return max(cands, key=lambda r: (r.ts, not r.derived))
     return None
 
 
@@ -121,12 +177,12 @@ def log_bet(
         for n, lg in enumerate(legs, 1):
             eff = exchange_effective_odds(lg.price, commission) if exchange else lg.price
             ref = reference_at(conn, config, lg.event_id, lg.market, lg.line, placed_at, closing=False)
-            ref_book, ref_p, ref_ts = (ref[0], ref[1].get(lg.selection), ref[2]) if ref else (None, None, None)
+            ref_book, ref_p, ref_ts = (ref.book, ref.probs.get(lg.selection), ref.ts) if ref else (None, None, None)
             conn.execute(
                 """
                 INSERT INTO tracked_bet_leg (bet_id, leg_no, event_id, market_id, selection, price, bookmaker_id,
-                  effective_price, p_model, ref_book, ref_odds_ts, ref_fair_prob, execution_edge)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                  effective_price, p_model, ref_book, ref_odds_ts, ref_fair_prob, execution_edge, ref_source_line)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     bet_id,
@@ -142,6 +198,7 @@ def log_bet(
                     ref_ts,
                     ref_p,
                     None if ref_p is None else eff * ref_p - 1,
+                    ref.source_line if ref else None,
                 ),
             )
     return bet_id
@@ -152,7 +209,8 @@ def refresh(conn: psycopg.Connection, config: Config) -> dict[str, int]:
     legs = conn.execute(
         """
         SELECT l.bet_id, l.leg_no, l.event_id, m.code, m.line::float, l.selection, l.effective_price::float,
-               l.close_fair_prob, e.status, r.home_goals, r.away_goals
+               l.close_fair_prob, e.status, r.home_goals, r.away_goals, l.ref_book, l.ref_odds_ts,
+               l.ref_source_line::float
         FROM tracked_bet_leg l JOIN tracked_bet b ON b.id = l.bet_id JOIN market m ON m.id = l.market_id
         JOIN event e ON e.id = l.event_id LEFT JOIN football_result r ON r.event_id = e.id
         WHERE b.status = 'open' OR l.close_fair_prob IS NULL
@@ -161,22 +219,30 @@ def refresh(conn: psycopg.Connection, config: Config) -> dict[str, int]:
     n_clv = n_settled = 0
     by_bet: dict = defaultdict(list)
     with conn.transaction():
-        for bet_id, leg_no, ev, market, line, sel, eff, close_p, status, hg, ag in legs:
+        for bet_id, leg_no, ev, market, line, sel, eff, close_p, status, hg, ag, rbook, rts, rsrc in legs:
             result = None
             if status == "void":
                 result = "void"
             elif hg is not None:
                 result = "won" if outcome(market, sel, line, hg, ag) else "lost"
             if close_p is None:
-                ref = reference_at(conn, config, ev, market, line, datetime.max, closing=True)
-                if ref and sel in ref[1]:
-                    close_p = ref[1][sel]
+                like = Ref(rbook, {}, rts, rsrc) if rbook else None
+                ref = reference_at(conn, config, ev, market, line, datetime.max, closing=True, like=like)
+                if ref and sel in ref.probs:
+                    close_p = ref.probs[sel]
                     conn.execute(
-                        "UPDATE tracked_bet_leg SET close_book = %s, close_fair_prob = %s, clv = %s "
-                        "WHERE bet_id = %s AND leg_no = %s",
-                        (ref[0], close_p, eff * close_p - 1, bet_id, leg_no),
+                        "UPDATE tracked_bet_leg SET close_book = %s, close_fair_prob = %s, clv = %s, "
+                        "close_source_line = %s, clv_note = NULL WHERE bet_id = %s AND leg_no = %s",
+                        (ref.book, close_p, eff * close_p - 1, ref.source_line, bet_id, leg_no),
                     )
                     n_clv += 1
+                elif like is not None and (other := reference_at(conn, config, ev, market, line, datetime.max, True)):
+                    have = f"derived from {other.source_line:g}" if other.derived else "quoted"
+                    want = f"derived from {like.source_line:g}" if like.derived else "quoted"
+                    conn.execute(
+                        "UPDATE tracked_bet_leg SET clv_note = %s WHERE bet_id = %s AND leg_no = %s",
+                        (f"no like-for-like close: placed against {want}, close is {have}", bet_id, leg_no),
+                    )
             if result:
                 conn.execute(
                     "UPDATE tracked_bet_leg SET result = %s WHERE bet_id = %s AND leg_no = %s", (result, bet_id, leg_no)

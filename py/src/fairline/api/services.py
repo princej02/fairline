@@ -126,6 +126,22 @@ def _sample_bands(conn, config: Config, pool: str, day: str, event_ids: list[int
     return out
 
 
+def _derived_notes(conn, cands, derived_books: set[str]) -> dict:
+    """(event_id, decision_ts) -> 'derived from 3.0' for the derivation a board row used: the
+    latest pre-decision derivation for that event, which is the snapshot the board picked."""
+    keys = {(c.event_id, c.decision_ts) for c in cands if c.ref_book in derived_books}
+    out = {}
+    for eid, dts in keys:
+        row = conn.execute(
+            "SELECT source_line::float, draw_fit_error FROM odds_derivation "
+            "WHERE event_id = %s AND NOT is_closing AND ts <= %s ORDER BY ts DESC LIMIT 1",
+            (eid, dts),
+        ).fetchone()
+        if row:
+            out[(eid, dts)] = f"derived from {row[0]:g} (draw fit {row[1]:+.1%})"
+    return out
+
+
 def board(
     conn: psycopg.Connection, config: Config, pool: str, day: str, strategy: str, offset_hours: float, bands: bool
 ) -> S.BoardOut:
@@ -146,7 +162,7 @@ def board(
             notes=["no matches on this day"],
         )
     ids = [e.event_id for e in events]
-    books = sorted(set(s.reference_books) | set(s.bettable_books))
+    books = s.live_quote_books()
     probs, quotes = load_inputs(conn, events, books, MODEL_NAME, config_hash(st.models.dixon_coles))
     band_rows: dict = {}
     if bands:
@@ -205,6 +221,7 @@ def board(
         ).fetchall()
     )
 
+    ref_notes = _derived_notes(conn, [pk.candidate for pk in picks], set(s.derived_references.values()))
     rows = []
     for pk, stake in zip(picks, stakes, strict=True):
         c = pk.candidate
@@ -227,6 +244,9 @@ def board(
                 p_model=c.p_model,
                 p_ref=c.p_ref,
                 ref_book=c.ref_book,
+                ref_note=ref_notes.get((c.event_id, c.decision_ts))
+                if c.ref_book in s.derived_references.values()
+                else None,
                 p_bet=pk.p,
                 ev_strategy=pk.ev,
                 ev_model=c.ev_model,
@@ -324,7 +344,7 @@ def event(conn: psycopg.Connection, config: Config, event_id: int) -> S.EventOut
 
 def odds_series(conn: psycopg.Connection, config: Config, event_id: int, market: str, line: float | None):
     s = config.settings.edge
-    books = sorted(set(s.reference_books) | set(s.bettable_books))
+    books = s.live_quote_books()  # includes derived references (e.g. pinnacle_derived)
     rows = conn.execute(
         """
         SELECT b.code, o.selection, o.ts, o.price::float, o.is_closing, o.ts_estimated FROM odds_snapshot o
@@ -338,7 +358,12 @@ def odds_series(conn: psycopg.Connection, config: Config, event_id: int, market:
     for book, sel, ts, price, closing_, est in rows:
         grouped[(book, sel)].append(S.OddsPoint(ts=ts, price=price, is_closing=closing_, ts_estimated=est))
     return [
-        S.OddsSeries(bookmaker=b, selection=sel, is_reference=b in s.reference_books, points=pts)
+        S.OddsSeries(
+            bookmaker=b,
+            selection=sel,
+            is_reference=b in s.reference_books or b in s.derived_references.values(),
+            points=pts,
+        )
         for (b, sel), pts in sorted(grouped.items())
     ]
 
@@ -427,7 +452,8 @@ def bets(conn: psycopg.Connection) -> list[S.BetOut]:
         SELECT b.id, b.placed_at, bk.code, b.stake::float, b.price::float, b.status, b.pnl::float, b.strategy, b.source,
                b.suggested_stake_pct, b.notes,
                l.leg_no, l.event_id, h.name || ' v ' || a.name, m.code, m.line::float, l.selection, l.price::float,
-               l.effective_price::float, l.ref_book, l.ref_fair_prob, l.execution_edge, l.close_fair_prob, l.clv, l.result
+               l.effective_price::float, l.ref_book, l.ref_fair_prob, l.execution_edge, l.close_fair_prob, l.clv, l.result,
+               l.ref_source_line::float, l.close_source_line::float, l.clv_note
         FROM tracked_bet b LEFT JOIN bookmaker bk ON bk.id = b.bookmaker_id
         JOIN tracked_bet_leg l ON l.bet_id = b.id JOIN market m ON m.id = l.market_id JOIN event e ON e.id = l.event_id
         JOIN participant h ON h.id = e.home_id JOIN participant a ON a.id = e.away_id
@@ -467,6 +493,9 @@ def bets(conn: psycopg.Connection) -> list[S.BetOut]:
                 close_fair_prob=r[22],
                 clv=r[23],
                 result=r[24],
+                ref_source_line=r[25],
+                close_source_line=r[26],
+                clv_note=r[27],
             )
         )
     return list(out.values())

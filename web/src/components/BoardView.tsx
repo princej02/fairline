@@ -167,7 +167,13 @@ function Row({ r, currency, onLog, onAcca, inSlip }: { r: BoardRow; currency: st
       <td className="px-3 py-2 text-right"><ProbCell p={r.p_model} band={r.band} /></td>
       <td className="px-3 py-2 text-right">
         <span className="num text-ref">{pct(r.p_ref)}</span>
-        {r.ref_book && r.ref_book !== "pinnacle" && <div className="text-xs text-muted">{book(r.ref_book)}</div>}
+        {r.ref_note ? (
+          <div className="text-xs text-warn" title="Pinnacle did not quote this line; the price is implied from its 1X2 and main totals line with a Dixon-Coles matrix. CLV is only measured against a close derived the same way.">
+            {r.ref_note}
+          </div>
+        ) : (
+          r.ref_book && r.ref_book !== "pinnacle" && <div className="text-xs text-muted">{book(r.ref_book)}</div>
+        )}
       </td>
       <td className={`num px-3 py-2 text-right ${evTone(r.ev_model)}`}>{signedPct(r.ev_model)}</td>
       <td className={`num px-3 py-2 text-right font-medium ${evTone(r.ev_vs_ref)}`}>{signedPct(r.ev_vs_ref)}</td>

@@ -1,4 +1,5 @@
-# kind: book | exchange | aggregate (aggregate = market max/average columns, not a real book)
+# kind: book | exchange | aggregate (market max/average columns) | derived (a price we computed
+#   from a real book's other markets; `derived_from` names that book)
 # is_sharp: used as a "true price" reference candidate (see settings.toml edge.reference_books)
 # the_odds_api: bookmaker key in that API; null = not offered there, so the live poller never requests it
 #   (Config.provider_books). Bet365 is not carried by The Odds API: it stays historical-only via the
@@ -11,5 +12,6 @@ bookmakers:
   - {code: skybet,        name: Sky Bet,          kind: book,      is_sharp: false, providers: {the_odds_api: skybet}}
   - {code: williamhill,   name: William Hill,     kind: book,      is_sharp: false, providers: {the_odds_api: williamhill}}
   - {code: paddypower,    name: Paddy Power,      kind: book,      is_sharp: false, providers: {the_odds_api: paddypower}}
+  - {code: pinnacle_derived, name: Pinnacle (derived), kind: derived, is_sharp: true, derived_from: pinnacle, providers: {}}
   - {code: market_max,    name: Market maximum,   kind: aggregate, is_sharp: false, providers: {}}
   - {code: market_avg,    name: Market average,   kind: aggregate, is_sharp: false, providers: {}}

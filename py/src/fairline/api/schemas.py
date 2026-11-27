@@ -56,6 +56,7 @@ class BoardRow(BaseModel):
     p_model: float
     p_ref: float | None
     ref_book: str | None
+    ref_note: str | None = None  # e.g. "derived from 3.0": the reference is computed, not quoted
     p_bet: float = Field(description="probability the chosen strategy bets on")
     ev_strategy: float
     ev_model: float
@@ -192,6 +193,9 @@ class BetLegOut(BaseModel):
     close_fair_prob: float | None
     clv: float | None
     result: str | None
+    ref_source_line: float | None = None  # set when the placement reference was derived ("derived from 3.0")
+    close_source_line: float | None = None
+    clv_note: str | None = None  # why CLV is empty when no like-for-like close exists
 
 
 class BetOut(BaseModel):
