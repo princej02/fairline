@@ -24,6 +24,7 @@ columns are shown next to it.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
@@ -123,6 +124,21 @@ def build_board(
     open_exposure: float = 0.0,
 ) -> Board:
     """quotes: (event_id, market, line) -> every quote with ts <= that event's decision time."""
+    cands, skipped = evaluate(events, probs, quotes, s, exchanges)
+    for pick in select(cands, s, prob_of=lambda c: c.p_model):
+        pick.candidate.on_board = True
+    _stake(cands, s, open_exposure)
+    return Board(cands, skipped)
+
+
+def evaluate(
+    events: list[EventInfo],
+    probs: list[ModelProb],
+    quotes: dict[tuple[int, str, float | None], list[Quote]],
+    s: EdgeSettings,
+    exchanges: set[str],
+) -> tuple[list[Candidate], dict[str, int]]:
+    """Every price at a bettable book with model, reference and flags attached. No selection."""
     ev_info = {e.event_id: e for e in events}
     model = {(p.event_id, p.market, p.line, p.selection): p for p in probs}
     cands: list[Candidate] = []
@@ -204,30 +220,45 @@ def build_board(
                     )  # fmt: skip
                 )
 
-    _select(cands, s)
-    _stake(cands, s, open_exposure)
-    return Board(cands, dict(skipped))
+    return cands, dict(skipped)
 
 
-def _select(cands: list[Candidate], s: EdgeSettings) -> None:
-    eligible = [
-        c for c in cands
-        if c.ev_model >= s.min_ev and c.price <= s.max_odds and "book_no_margin" not in c.flags
-    ]  # fmt: skip
-    best: dict[tuple, Candidate] = {}
-    for c in eligible:  # line shopping: best effective price per selection
-        k = (c.event_id, c.market, c.line, c.selection)
-        if k not in best or c.effective_price > best[k].effective_price:
-            best[k] = c
-    chosen = list(best.values())
+@dataclass
+class Pick:
+    candidate: Candidate
+    p: float  # probability the strategy bets on
+    ev: float  # p * effective_price - 1
+
+
+def select(
+    cands: list[Candidate],
+    s: EdgeSettings,
+    prob_of: Callable[[Candidate], float | None],
+    keep: Callable[[Candidate], bool] | None = None,
+    min_ev: float | None = None,
+) -> list[Pick]:
+    """Board selection rules for any probability source: EV >= min_ev, raw price <= max_odds,
+    book has a margin, best effective price per selection, then (by default) one pick per match."""
+    min_ev = s.min_ev if min_ev is None else min_ev
+    best: dict[tuple, Pick] = {}
+    for c in cands:
+        p = prob_of(c)
+        if p is None or c.price > s.max_odds or "book_no_margin" in c.flags or (keep and not keep(c)):
+            continue
+        ev = p * c.effective_price - 1
+        if ev < min_ev:
+            continue
+        k = (c.event_id, c.market, c.line, c.selection)  # line shopping
+        if k not in best or c.effective_price > best[k].candidate.effective_price:
+            best[k] = Pick(c, p, ev)
+    picks = list(best.values())
     if s.one_per_match:
-        top: dict[int, Candidate] = {}
-        for c in chosen:
-            if c.event_id not in top or c.ev_model > top[c.event_id].ev_model:
-                top[c.event_id] = c
-        chosen = list(top.values())
-    for c in chosen:
-        c.on_board = True
+        top: dict[int, Pick] = {}
+        for pk in picks:
+            if pk.candidate.event_id not in top or pk.ev > top[pk.candidate.event_id].ev:
+                top[pk.candidate.event_id] = pk
+        picks = list(top.values())
+    return picks
 
 
 def _stake(cands: list[Candidate], s: EdgeSettings, open_exposure: float) -> None:

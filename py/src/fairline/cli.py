@@ -60,6 +60,18 @@ def main(argv: list[str] | None = None) -> int:
     eb.add_argument("--all", action="store_true", help="show every evaluated price, not just the board")
     eb.add_argument("--persist", action="store_true", help="write all evaluated prices to the edge table")
 
+    pbt = sub.add_parser("backtest").add_subparsers(dest="action", required=True)
+    br = pbt.add_parser("run", help="walk-forward betting + probability backtest")
+    br.add_argument("--pools", default="ENG,ESP,GER,FRA")
+    br.add_argument("--from", dest="first", default="2017-18")
+    br.add_argument("--to", dest="last", default="2025-26")
+    br.add_argument("--offset-hours", type=float, default=2.0)
+    br.add_argument("--boot", type=int, default=2000, help="bootstrap resamples")
+    br.add_argument("--persist", action="store_true", help="store a backtest_run row")
+    bb = pbt.add_parser("bands", help="check PyMC band calibration on a sample of slates")
+    bb.add_argument("--pools", default="ENG,GER")
+    bb.add_argument("--slates", type=int, default=12, help="slates per pool")
+
     args = p.parse_args(argv)
     config = get_config()
 
@@ -68,6 +80,22 @@ def main(argv: list[str] | None = None) -> int:
             applied = db.migrate(conn)
             db.sync_reference(conn, config)
             print(f"applied: {applied or 'nothing new'}; reference tables synced")
+            return 0
+
+        if args.cmd == "backtest":
+            pools = [x.strip() for x in args.pools.split(",")]
+            bad = [x for x in pools if x not in config.settings.models.dixon_coles.pools]
+            if bad:
+                print(f"refused: unknown pools {bad}", file=sys.stderr)
+                return 2
+            if args.action == "run":
+                from fairline.backtest.run import run_backtest
+
+                run_backtest(conn, config, pools, args.first, args.last, args.offset_hours, args.persist, args.boot)
+            else:
+                from fairline.backtest.bands import run_bands
+
+                run_bands(conn, config, pools, args.slates)
             return 0
 
         if args.cmd == "edge":

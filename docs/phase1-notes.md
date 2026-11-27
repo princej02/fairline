@@ -53,14 +53,55 @@ Decisions and constraints to carry into the remaining Phase 1 tasks.
   P1.4 should test filters (require ev_vs_ref >= 0, hide disagreement-flagged picks)
   walk-forward, with confidence intervals, before any default changes.
 
-## P1.4 Backtester
+## P1.4 Backtester (done)
 
-- Validate the PyMC 90% bands with binned calibration, not by checking whether outcomes fall
-  inside them. An interval on p can't "contain" a 0/1 outcome. Bin predictions by
-  posterior mean (or by band) and check that the realised win rate in each bin falls inside
-  the bin's band. Or use posterior predictive calibration (PIT-style checks).
-- Report log loss and Brier with bootstrap confidence intervals, and always alongside the
-  Pinnacle-close baseline with the margin removed. In P1.2 the MLE was about 0.02 worse
-  than that baseline on 1X2 log loss in every country.
-- Bet only at prices whose `ts` is at or before the decision time. Pre-match
-  football-data.co.uk prices carry a conservative estimated ts (kickoff - 2h).
+`fairline backtest run` (stored as `backtest_run` rows) and `fairline backtest bands`.
+
+Method:
+- Each match is decided at kickoff - 2h, using walk-forward predictions with as_of <= decision
+  and prices with ts <= decision. Closing prices only score bets (CLV), never choose them.
+  football-data.co.uk pre-match prices carry an estimated ts of kickoff - 2h; they were really
+  collected earlier (Friday or Tuesday), so with this data source only offsets <= 2h mean anything.
+- Five strategies share the same evaluated prices, selection rules (min_ev 3%, max_odds 6,
+  line shopping, one pick per match) and staking caps, on one bankroll across all pools:
+  model, model_beats_ref, model_no_disagree, reference (pure soft-book hunting, model ignored)
+  and blend. The blend weight for season S is fitted on log loss over seasons before S only.
+- Confidence intervals come from a cluster bootstrap over matchdays, since bets on the same day
+  are correlated. Log-loss differences against the Pinnacle close are paired on the same matches.
+
+Results (ENG, ESP, GER, FRA, 2017-18 to 2025-26, backtest_run id 1):
+
+| Strategy | Bets | Flat ROI (95% CI) | CLV (95% CI) | Kelly bankroll | Max drawdown | Slate cap binds |
+|---|---|---|---|---|---|---|
+| model | 22,458 | -8.3% [-10.1, -6.5] | -5.0% [-5.1, -4.9] | 0.00x | 100% | 86% |
+| model_beats_ref | 1,423 | -3.5% [-11.3, +4.8] | +0.9% [+0.3, +1.4] | 0.26x | 81% | 1% |
+| model_no_disagree | 20,383 | -7.8% [-9.8, -5.9] | -5.1% | 0.00x | 100% | 83% |
+| reference | 777 | -2.2% [-13.3, +8.4] | +2.3% [+1.5, +3.1] | 0.93x | 32% | 0% |
+| blend | 783 | -2.6% [-13.4, +8.6] | +2.2% | 0.93x | 32% | 0% |
+
+- **The model adds no signal over the sharp price.** The fitted blend weight on Dixon-Coles
+  is 0 (at most 0.05) in every pool and season. 1X2 log loss: model +0.0197 vs close,
+  Pinnacle at decision time +0.0028, a CI of [+0.0174, +0.0220] for the model.
+- **Kelly on the raw model is ruinous.** Overconfident probabilities plus Kelly drove the
+  bankroll to zero. The slate cap binds on 86% of picks, which compresses stake differences
+  between strong and weak picks. Once the "must beat Pinnacle" filter is applied it binds on
+  only 1%.
+- **Only the sharp-price strategies beat the close:** reference CLV +2.3%, 61.5% of bets beat
+  the close. ROI CIs are too wide to call (777 bets at average odds of 3.5); CLV is the better
+  evidence. Caveat: these are price-collection-time quotes from three soft books (B365, WH,
+  Betfair); real availability, limits and stale prices are untested.
+- **Calibration:** 1X2 is close to calibrated. O/U 2.5 is badly overconfident at the extremes
+  (predicted 0.18 -> realised 0.30, 0.82 -> 0.70), which points to too little shrinkage of team
+  strengths or too short a half-life.
+- **PyMC bands are too wide:** on 24 slates the Pinnacle close fell inside the 90% band 98.7%
+  of the time (mean width 0.29), so conservative EV built on them is overly pessimistic.
+  The binned realised rates all sat inside the bands, which is uninformative at this width.
+  Heavy favourites (mean p 0.71) realised 0.61.
+
+Next steps this points to:
+1. Tune `half_life_days` and `prior_sd` walk-forward against the O/U and 1X2 log loss,
+   choosing on early seasons and confirming on later ones.
+2. Treat the model as an adjustment to the sharp price (e.g. news effects), not a
+   replacement. The default board should probably require `ev_vs_ref >= 0`.
+3. Re-check band width after tuning; the time-decay weights probably inflate the
+   posterior variance.
