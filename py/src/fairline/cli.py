@@ -43,6 +43,15 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--backfill", action="store_true")
     f.add_argument("--force", action="store_true", help="ignore the download cache")
 
+    pm_ = sub.add_parser("model").add_subparsers(dest="action", required=True)
+    w = pm_.add_parser("walkforward", help="walk-forward Dixon-Coles MLE for one country pool")
+    w.add_argument("--pool", required=True, help="e.g. ENG (see models.dixon_coles.pools)")
+    w.add_argument("--cold-start", choices=["pooled", "prior"], help="override settings.toml")
+    w.add_argument("--persist", action="store_true", help="write model_version + prediction rows")
+    bz = pm_.add_parser("bayes", help="PyMC uncertainty bands for the week after --as-of")
+    bz.add_argument("--pool", required=True)
+    bz.add_argument("--as-of", required=True, help="YYYY-MM-DD (UTC midnight)")
+
     args = p.parse_args(argv)
     config = get_config()
 
@@ -51,6 +60,18 @@ def main(argv: list[str] | None = None) -> int:
             applied = db.migrate(conn)
             db.sync_reference(conn, config)
             print(f"applied: {applied or 'nothing new'}; reference tables synced")
+            return 0
+
+        if args.cmd == "model":
+            from fairline.models.football.run import run_bayes, run_walkforward
+
+            if args.pool not in config.settings.models.dixon_coles.pools:
+                print(f"refused: unknown pool {args.pool!r}", file=sys.stderr)
+                return 2
+            if args.action == "walkforward":
+                print(run_walkforward(conn, config, args.pool, cold_start=args.cold_start, persist=args.persist))
+            else:
+                print(run_bayes(conn, config, args.pool, args.as_of))
             return 0
 
         from fairline.ingest.football_data_co_uk.pipeline import backfill, ingest_season
