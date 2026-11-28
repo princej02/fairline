@@ -78,7 +78,10 @@ def run(conn: psycopg.Connection, config: Config, args) -> int:
         print(P.rederive_from_cache(conn, config, files), "(cached responses only, 0 credits)")
         return 0
     if args.action == "close":
-        print(P.finalize_closing(conn, config, now))
+        if args.redo_since:
+            print(P.reclose(conn, config, datetime.fromisoformat(args.redo_since).replace(tzinfo=UTC), now))
+        else:
+            print(P.finalize_closing(conn, config, now))
         return 0
     if args.action == "budget":
         led = P.ledger(conn, now)
