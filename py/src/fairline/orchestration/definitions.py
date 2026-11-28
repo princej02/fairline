@@ -81,8 +81,36 @@ def dixon_coles_walkforward(context: AssetExecutionContext) -> MaterializeResult
 from dagster import DefaultScheduleStatus, OpExecutionContext, job, op  # noqa: E402
 
 from fairline.ingest.the_odds_api.poll import tick  # noqa: E402
+from fairline.tracker.service import refresh as _tracker_refresh  # noqa: E402
 
 _odds = _cfg.settings.odds_api
+
+
+# ---------------------------------------------------------------- tracker refresh
+# Chained to the jobs that change what it reads, never on its own clock: after each result/status
+# sync (as a downstream op, so a failed sync skips it), after the fdcuk refresh (run-status sensor),
+# and inside the odds tick when it has just finalized closes (CLV without waiting for results).
+def _refresh(context: OpExecutionContext) -> dict:
+    with db.connect() as conn:
+        out = _tracker_refresh(conn, get_config())
+    context.log.info(f"tracker refresh: {out}")
+    return out
+
+
+@op
+def tracker_refresh(context: OpExecutionContext, after: dict) -> dict:
+    """Fill CLV and settle tracked bets. Runs only once the upstream sync op has succeeded."""
+    return _refresh(context)
+
+
+@op
+def tracker_refresh_now(context: OpExecutionContext) -> dict:
+    return _refresh(context)
+
+
+@job
+def tracker_refresh_job():
+    tracker_refresh_now()
 
 
 @op
@@ -98,7 +126,10 @@ def odds_tick(context: OpExecutionContext) -> dict:
         (context.log.warning if r.status in ("failed", "skipped") or r.unresolved else context.log.info)(
             msg + (f" unresolved={r.unresolved}" if r.unresolved else "")
         )
-    return {"spent": rep.spent, "remaining": rep.remaining, "polls": len(rep.polls), "closing": rep.closing}
+    out = {"spent": rep.spent, "remaining": rep.remaining, "polls": len(rep.polls), "closing": rep.closing}
+    if rep.closing.get("closed"):
+        out["tracker"] = _refresh(context)
+    return out
 
 
 @job
@@ -161,12 +192,12 @@ def fdo_window_sync(context: OpExecutionContext) -> dict:
 
 @job
 def fdo_season_job():
-    fdo_season_sync()
+    tracker_refresh(fdo_season_sync())
 
 
 @job
 def fdo_window_job():
-    fdo_window_sync()
+    tracker_refresh(fdo_window_sync())
 
 
 @schedule(job=fdo_season_job, cron_schedule="15 5 * * *", execution_timezone="Europe/London",
@@ -181,8 +212,28 @@ def fdo_window_15m(context: ScheduleEvaluationContext):
     return RunRequest(run_key=f"fdo-window:{context.scheduled_execution_time:%Y%m%d%H%M}")
 
 
+from dagster import (  # noqa: E402
+    DagsterRunStatus,
+    DefaultSensorStatus,
+    RunStatusSensorContext,
+    run_status_sensor,
+)
+
+
+@run_status_sensor(
+    run_status=DagsterRunStatus.SUCCESS,
+    monitored_jobs=[fdcuk_job],
+    request_job=tracker_refresh_job,
+    default_status=DefaultSensorStatus.RUNNING,  # free and idempotent: nothing to opt into
+)
+def tracker_after_fdcuk(context: RunStatusSensorContext):
+    """football-data.co.uk is the only result source for ESP2/GER2/FRA2: settle as soon as it lands."""
+    return RunRequest(run_key=f"tracker:{context.dagster_run.run_id}")
+
+
 defs = Definitions(
     assets=[fdcuk_season, dixon_coles_walkforward],
-    jobs=[fdcuk_job, odds_tick_job, walkforward_job, fdo_season_job, fdo_window_job],
+    jobs=[fdcuk_job, odds_tick_job, walkforward_job, fdo_season_job, fdo_window_job, tracker_refresh_job],
     schedules=[fdcuk_current_season_daily, odds_tick_schedule, walkforward_daily, fdo_season_daily, fdo_window_15m],
+    sensors=[tracker_after_fdcuk],
 )

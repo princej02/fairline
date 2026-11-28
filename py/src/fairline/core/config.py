@@ -162,6 +162,9 @@ class ModelSettings(BaseModel):
 class TrackerSettings(BaseModel):
     bankroll: float = Field(gt=0)
     currency: str
+    # A leg is void when its match is cancelled, or not played within this many hours of the kickoff
+    # it was placed against (postponed, or rearranged to a later date). Check your books' rules.
+    postponed_void_hours: float = Field(48, gt=0)
 
 
 class Settings(BaseModel):

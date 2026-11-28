@@ -129,3 +129,4 @@ target_accept = 0.90            # NUTS step-size target; 0.95 tested, no fewer d
 [tracker]
 bankroll = 1000.0               # used to turn suggested stake fractions into amounts; set your own
 currency = "GBP"
+postponed_void_hours = 48       # void a leg whose match isn't played within this of its original kickoff

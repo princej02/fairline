@@ -62,6 +62,22 @@ Dagster: `fdo_season_daily` (05:15 London) and `fdo_window_15m`, both shipped st
 - `fairline odds budget` on the real fixture list: 112 credits for the next 7 days (EPL midweek
   round), about 486 a month, inside the 500 credits.
 
+- **Tracker refresh is chained, not scheduled** (`orchestration/definitions.py`). It runs as the
+  last op of `fdo_window_job` (every 15 min) and `fdo_season_job` (05:15), so a failed sync skips
+  it. A run-status sensor, `tracker_after_fdcuk`, runs it after each successful fdcuk run, since
+  fdcuk is the only result source for ESP2/GER2/FRA2. It also runs inside the odds tick whenever
+  that tick finalized closes, so CLV fills minutes after kickoff. It is free and idempotent, and a
+  pg advisory lock keeps two runs from overlapping.
+- **Settlement rules.**
+  - Accas fill CLV per leg as each match closes. They stay open, and count toward open exposure,
+    until a leg loses (settled lost then, as the bookmaker does) or every leg is won or void.
+  - A leg is void when the match is CANCELLED. It is also void when the match is POSTPONED and not
+    played within `tracker.postponed_void_hours` (48) of the kickoff it was placed against, or is
+    rearranged to a date past that window.
+  - `tracked_bet_leg.kickoff_at` (migration 0007) keeps that original kickoff, because
+    football-data.org moves `event.starts_at`. Voiding releases the stake from exposure.
+  - House rules differ, so check your books' rules.
+
 ## P1.1-7 Live odds poller (The Odds API) (done)
 
 Code: `py/src/fairline/ingest/the_odds_api/`. Key: `THE_ODDS_API_KEY` in `.env`.

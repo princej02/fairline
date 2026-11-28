@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import psycopg
@@ -147,6 +147,7 @@ def log_bet(
         raise ValueError(f"unknown bookmaker {bookmaker}")
     exchange = config.bookmakers[bookmaker].kind == "exchange"
     commission = config.settings.edge.betfair_commission
+    lg_kickoff: dict[int, datetime] = {}
     with conn.transaction():
         book_id = conn.execute("SELECT id FROM bookmaker WHERE code = %s", (bookmaker,)).fetchone()[0]
         for lg in legs:
@@ -155,6 +156,7 @@ def log_bet(
                 raise ValueError(f"unknown event {lg.event_id}")
             if placed_at >= ko[0]:
                 raise ValueError(f"event {lg.event_id} has already kicked off; only pre-match bets are tracked")
+            lg_kickoff[lg.event_id] = ko[0]
         price = math.prod(lg.price for lg in legs)
         bet_id = conn.execute(
             """
@@ -181,8 +183,9 @@ def log_bet(
             conn.execute(
                 """
                 INSERT INTO tracked_bet_leg (bet_id, leg_no, event_id, market_id, selection, price, bookmaker_id,
-                  effective_price, p_model, ref_book, ref_odds_ts, ref_fair_prob, execution_edge, ref_source_line)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                  effective_price, p_model, ref_book, ref_odds_ts, ref_fair_prob, execution_edge, ref_source_line,
+                  kickoff_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     bet_id,
@@ -199,32 +202,55 @@ def log_bet(
                     ref_p,
                     None if ref_p is None else eff * ref_p - 1,
                     ref.source_line if ref else None,
+                    lg_kickoff[lg.event_id],
                 ),
             )
     return bet_id
 
 
-def refresh(conn: psycopg.Connection, config: Config) -> dict[str, int]:
-    """Fill closing reference / CLV where the close is known, and settle finished open bets."""
-    legs = conn.execute(
-        """
-        SELECT l.bet_id, l.leg_no, l.event_id, m.code, m.line::float, l.selection, l.effective_price::float,
-               l.close_fair_prob, e.status, r.home_goals, r.away_goals, l.ref_book, l.ref_odds_ts,
-               l.ref_source_line::float
-        FROM tracked_bet_leg l JOIN tracked_bet b ON b.id = l.bet_id JOIN market m ON m.id = l.market_id
-        JOIN event e ON e.id = l.event_id LEFT JOIN football_result r ON r.event_id = e.id
-        WHERE b.status = 'open' OR l.close_fair_prob IS NULL
-        """
-    ).fetchall()
+def leg_result(
+    market: str, selection: str, line: float | None, status: str, starts_at: datetime,
+    kickoff_at: datetime | None, home_goals: int | None, away_goals: int | None, now: datetime, void_after: timedelta,
+) -> str | None:  # fmt: skip
+    """won | lost | void, or None while undecided. Void: cancelled; rearranged to a date outside the
+    window after the kickoff the bet was placed against; or postponed and the window has passed."""
+    placed_ko = kickoff_at or starts_at
+    if status == "void":
+        return "void"
+    if starts_at > placed_ko + void_after:
+        return "void"
+    if status == "postponed":
+        return "void" if now > placed_ko + void_after else None
+    if home_goals is not None:
+        return "won" if outcome(market, selection, line, home_goals, away_goals) else "lost"
+    return None
+
+
+REFRESH_LOCK = 0x7472_6B72  # pg advisory lock: one refresh at a time (scheduled jobs and the UI button)
+
+
+def refresh(conn: psycopg.Connection, config: Config, now: datetime | None = None) -> dict[str, int]:
+    """Fill closing reference / CLV where the close is known, and settle open bets whose legs are
+    all decided. Per-leg CLV fills as each match closes; a multi-leg bet stays open (and its stake
+    counts as open exposure) until a leg loses or every leg is won or void. Idempotent and free."""
+    now = now or datetime.now(UTC)
+    void_after = timedelta(hours=config.settings.tracker.postponed_void_hours)
     n_clv = n_settled = 0
     by_bet: dict = defaultdict(list)
     with conn.transaction():
-        for bet_id, leg_no, ev, market, line, sel, eff, close_p, status, hg, ag, rbook, rts, rsrc in legs:
-            result = None
-            if status == "void":
-                result = "void"
-            elif hg is not None:
-                result = "won" if outcome(market, sel, line, hg, ag) else "lost"
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (REFRESH_LOCK,))
+        legs = conn.execute(
+            """
+            SELECT l.bet_id, l.leg_no, l.event_id, m.code, m.line::float, l.selection, l.effective_price::float,
+                   l.close_fair_prob, e.status, r.home_goals, r.away_goals, l.ref_book, l.ref_odds_ts,
+                   l.ref_source_line::float, e.starts_at, l.kickoff_at
+            FROM tracked_bet_leg l JOIN tracked_bet b ON b.id = l.bet_id JOIN market m ON m.id = l.market_id
+            JOIN event e ON e.id = l.event_id LEFT JOIN football_result r ON r.event_id = e.id
+            WHERE b.status = 'open' OR l.close_fair_prob IS NULL
+            """
+        ).fetchall()
+        for bet_id, leg_no, ev, market, line, sel, eff, close_p, status, hg, ag, rbook, rts, rsrc, ko, ko0 in legs:
+            result = leg_result(market, sel, line, status, ko, ko0, hg, ag, now, void_after)
             if close_p is None:
                 like = Ref(rbook, {}, rts, rsrc) if rbook else None
                 ref = reference_at(conn, config, ev, market, line, datetime.max, closing=True, like=like)
