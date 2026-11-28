@@ -6,11 +6,32 @@ kelly_fraction = 0.25          # fractional Kelly multiplier
 max_stake_pct = 0.02           # hard cap per bet, as a fraction of bankroll
 min_ev = 0.03                  # hide edges below +3% EV on the board
 max_odds = 6.0                 # hide prices above this by default (model least reliable)
-devig_method = "power"         # multiplicative | power | shin
-# Sharp "true price" references, in priority order. Pinnacle closing is primary;
+devig_method = "power"         # multiplicative | additive | power | shin
+# Sharp "true price" references, in priority order. Pinnacle is primary;
 # Betfair Exchange is the fallback where Pinnacle is missing.
 reference_books = ["pinnacle", "betfair_ex_uk"]
-betfair_commission = 0.05      # set to your actual Betfair rate; applied before comparing prices
+# Books you can actually bet with (Pinnacle is reference-only: it doesn't take UK customers).
+bettable_books = ["bet365", "skybet", "williamhill", "paddypower", "betfair_ex_uk"]
+# Applied to Betfair prices whenever Betfair is where you would bet (EV, Kelly):
+# effective odds = 1 + (O - 1) * (1 - c). Not applied when Betfair is only the *reference*:
+# commission changes what you are paid, not the probability the price implies.
+betfair_commission = 0.05      # set to your actual Betfair rate
+
+# Exposure. Stakes are capped per bet, then per match (all markets on one match are
+# correlated), then per slate (bets open at the same time). When a cap binds, every stake
+# in that group is scaled down proportionally; none are dropped.
+max_match_exposure_pct = 0.02
+max_slate_exposure_pct = 0.10
+
+# Board defaults
+one_per_match = true           # show only the highest-EV selection per match by default
+disagreement_warn = 0.10       # flag when |model p - sharp fair p| exceeds this (likely model miss)
+conservative_quantile = 0.25   # "conservative EV" uses this posterior quantile of p when bands exist
+
+# Accas. max_odds above applies to each leg (it is about model reliability per selection);
+# the combined price has its own cap.
+acca_max_legs = 4
+acca_max_combined_odds = 20.0
 
 [markets]
 enabled = ["1X2", "OU_2.5"]    # Phase 1. Next: AH, then BTTS.
@@ -23,14 +44,41 @@ refresh_current_hours = 12     # completed seasons are downloaded once and cache
 request_delay_seconds = 2.0    # be polite: one request every 2s at most
 cache_dir = "data/raw/football_data_co_uk"
 
-[ingest.the_odds_api]            # Phase 1 task P1.1-7 (not built yet)
-regions = "uk"
+[ingest.the_odds_api]            # Phase 1 task P1.1-7. Key: THE_ODDS_API_KEY in .env
+# Cost per /odds call = markets x regions credits; /events and /sports are free. Pinnacle is in the
+# "eu" region, not "uk", so regions="uk,eu" would cost 4 credits per league per poll. Passing
+# `bookmakers=` instead bills each group of 10 books as one region: 2 credits per call.
+# The poller sends `bookmakers` from Config.provider_books("the_odds_api").
+# Bet365 is not on The Odds API (null in bookmakers.yaml); it stays historical-only.
+base_url = "https://api.the-odds-api.com/v4"
 markets = "h2h,totals"
+fixture_competitions = ["ENG1", "ENG2", "ESP1", "ESP2", "GER1", "GER2", "FRA1", "FRA2"]  # free /events sync only
+competitions = ["ENG1", "ESP1", "GER1", "FRA1"]   # paid odds polls: top divisions only on the free tier (~390 credits/month simulated); add the second tiers after live CLV holds up
 monthly_credit_budget = 500     # free tier; the poller must stay under this
+reserve_credits = 10            # never spend the last few (manual checks, mistakes)
+burst_days = 7                  # window polls may run this many days of allowance ahead of an even
+                                # monthly spend (weekend slates cluster); closing polls are exempt
+warn_at = 0.80                  # warn when this share of the month's budget is used
+poll_windows_hours = [24, 3]    # poll a league once each fixture enters these windows (3h = news re-score)
+window_tolerance_share = 0.34   # a poll up to this share of a window early covers it (T-24h <- T-32h)
+close_window_minutes = 20       # closing poll this long before kickoff
+close_max_age_minutes = 30      # a snapshot only counts as closing if polled this close to kickoff
+events_refresh_hours = 6        # free /events fixture list, cached
+tick_minutes = 5                # scheduler cadence
+derived_rho_default = -0.03     # O/U 2.5 derived from Pinnacle's main line uses the league's latest
+                                # fitted Dixon-Coles rho; this only when a league has no fit yet
 cache_dir = "data/raw/the_odds_api"
 
-[ingest.football_data_org]       # Phase 1 task P1.1-6 (not built yet)
-request_delay_seconds = 6.5     # free tier is rate limited per minute
+[ingest.football_data_org]       # Phase 1 task P1.1-6. Token: FOOTBALL_DATA_ORG_TOKEN in .env
+# Free tier: 10 requests/minute, no monthly cap. Covers ENG1, ENG2, ESP1, GER1, FRA1 (and UCL);
+# not ESP2/GER2/FRA2, whose fixtures come from The Odds API's free /events list instead.
+# Source of: the full season fixture list, kickoff changes, postponements/cancellations, and
+# results within minutes of full time (football-data.co.uk's CSV lags by a day or two).
+base_url = "https://api.football-data.org/v4"
+competitions = ["ENG1", "ENG2", "ESP1", "GER1", "FRA1"]
+request_delay_seconds = 6.5     # stays under 10/minute
+window_days_back = 1            # the rolling sync covers [today - back, today + ahead]
+window_days_ahead = 1
 cache_dir = "data/raw/football_data_org"
 
 [news]                           # Phase 2
@@ -40,3 +88,45 @@ llm_model = "claude-haiku-5-5"
 
 [alerts]                         # Phase 2
 channel = "telegram"
+
+[models.dixon_coles]
+max_goals = 10                  # score grid is 0..max_goals per side (>= 10 enforced), renormalised
+half_life_days = 180            # time-decay weight: 0.5 ** (age_days / half_life_days)
+max_history_days = 1460         # ignore matches older than this (weights are ~0 anyway)
+prior_sd = 0.6                  # Gaussian prior (ridge) on attack/defence; also fixes identifiability
+rho_bounds = [-0.3, 0.3]
+result_delay_hours = 2          # a result is "known" only from kickoff + this; anti-leakage
+# Cold start for promoted teams:
+#   pooled: fit top + second tier jointly per country, so a promoted club arrives with
+#           ratings learned from its second-tier matches (scale linked through teams that move).
+#   prior:  fit each competition alone; teams without history get the prior below.
+# In both modes a team with too little weighted history falls back to the prior.
+cold_start = "pooled"
+min_effective_matches = 4.0     # sum of decay weights below this => use the cold-start prior
+promoted_prior_quantile = 0.25  # prior = this quantile of attack/defence in the team's division
+
+[models.dixon_coles.pools]      # country pools for the pooled fit; first entry is the top tier
+ENG = ["ENG1", "ENG2"]
+ESP = ["ESP1", "ESP2"]
+GER = ["GER1", "GER2"]
+FRA = ["FRA1", "FRA2"]
+
+[models.walkforward]
+burn_in_days = 365              # first predictions start this long after the earliest data
+retrain_every_days = 7
+live_horizon_hours = 72         # live scoring: one extra fit with the training cutoff at now, scoring
+                                # every fixture in the next 72h (so a Sunday game is scored before its
+                                # Saturday T-24h poll); the next morning's run supersedes it
+
+[models.bayes]                  # PyMC: live-slate uncertainty bands only, never the backtest loop
+history_days = 730
+draws = 1000
+tune = 1000
+chains = 4
+interval = 0.90                 # prob_lo / prob_hi = central 90% credible interval
+target_accept = 0.90            # NUTS step-size target; 0.95 tested, no fewer divergences
+
+[tracker]
+bankroll = 1000.0               # used to turn suggested stake fractions into amounts; set your own
+currency = "GBP"
+postponed_void_hours = 48       # void a leg whose match isn't played within this of its original kickoff
