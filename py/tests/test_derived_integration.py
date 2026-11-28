@@ -150,3 +150,41 @@ def test_replay_from_cache_restores_derived_baselines(env):
     out = rederive_from_cache(conn, CFG, files)
     assert out["derived"] == n and out["inserted"] == 2 * n  # over + under per derivation
     assert rederive_from_cache(conn, CFG, files)["inserted"] == 0  # idempotent
+
+
+def test_close_copies_only_lines_the_close_poll_priced(env):
+    """Pinnacle quotes 2.5 at T-3h, then moves its only line to 2.75 before the close. Its old 2.5
+    rows are still the latest on file, but the close poll never priced 2.5: the close must be the
+    derived 2.5 (from 2.75), not the stale quoted one stamped with the close poll's time."""
+    conn, api, client = env
+    from fairline.ingest.the_odds_api.poll import reclose
+
+    ko = KO_B + timedelta(days=1)
+    api.fx = [("evC", "Arsenal", "Fulham", ko, lambda t: 2.75 if t >= ko - timedelta(minutes=30) else 2.5)]
+    for t in [ko - timedelta(hours=3), ko - timedelta(minutes=18)]:
+        api.now = t
+        assert all(p.status == "ok" for p in tick(conn, CFG, client, now=t).polls)
+    c = eid(conn, "evC")
+    bet = T.log_bet(conn, CFG, [T.LegIn(c, "OU", "under", 1.95, 2.5)], "williamhill", 10, ko - timedelta(hours=2))
+    assert conn.execute("SELECT ref_book FROM tracked_bet_leg WHERE bet_id = %s", (bet,)).fetchone() == ("pinnacle",)
+
+    def closes():
+        return conn.execute(
+            "SELECT b.code, m.code, m.line::float FROM odds_snapshot o JOIN bookmaker b ON b.id = o.bookmaker_id "
+            "JOIN market m ON m.id = o.market_id WHERE o.is_closing AND o.event_id = %s GROUP BY 1, 2, 3 ORDER BY 1, 2",
+            (c,),
+        ).fetchall()
+
+    finalize_closing(conn, CFG, ko + timedelta(minutes=5))
+    expected = [("pinnacle", "1X2", None), ("pinnacle_derived", "OU", 2.5), ("williamhill", "OU", 2.5)]
+    assert closes() == expected
+    T.refresh(conn, CFG)
+    clv, note = conn.execute("SELECT clv, clv_note FROM tracked_bet_leg WHERE bet_id = %s", (bet,)).fetchone()
+    assert clv is None and note == "no like-for-like close: placed against quoted, close is derived from 2.75"
+
+    # polls recorded before `quoted` existed are rebuilt from their cached response
+    conn.execute("UPDATE ingestion_run SET stats = stats - 'quoted' WHERE source = 'the_odds_api' AND stats ? 'quoted'")
+    conn.commit()
+    out = reclose(conn, CFG, ko - timedelta(hours=1), ko + timedelta(minutes=10))
+    assert out["events"] == 1 and out["closed"] == 1 and out["legs_reset"] == 1
+    assert closes() == expected

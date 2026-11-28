@@ -168,6 +168,19 @@ Add the second tiers, or pay for a bigger tier, only after live CLV holds up in 
     one only with a close derived from the same source line. Anything else leaves CLV empty with a
     `clv_note`, so a 0.5-1% line-translation residual cannot pass for CLV. The backtester never
     loads derived books; historical Pinnacle O/U is always quoted.
+  - *Closes copy only lines the close poll priced* (fixed after the first live evening, 27 Nov).
+    Pinnacle quotes one totals line per match (451 of 451 cached markets). Forest v Chelsea's main
+    line moved from 2.5 to 2.75 after 17:00. `finalize_closing` used to copy each book's latest
+    row per market, so the 17:00 quoted 2.5 was stamped as a 19:40 close beside the derived one. A
+    test bet then showed CLV against a 2h40m-old price. Each poll now records `quoted`
+    (book|market|line keys, derived included), and only those keys are copied. Older polls rebuild
+    the keys from their cached response. `fairline odds close --redo-since DATE` rebuilds closes
+    and clears tracked CLV, so the next refresh recomputes it.
+  - *Accuracy of derived vs quoted 2.5.* This can't be measured at the same instant. With one
+    Pinnacle line per match, a poll has either a quoted 2.5 or a derived one, never both, and
+    football-data.co.uk history has only the 2.5 line. The check that will work is outcome
+    calibration: log loss of derived vs quoted references on settled matches, once a few hundred
+    have built up.
 - **Not done here.**
   - Live predictions for upcoming fixtures (the model only scores past matchdays so far), and so a
     live board.

@@ -83,7 +83,9 @@ def main(argv: list[str] | None = None) -> int:
     pp = po.add_parser("poll", help="run one scheduler tick: plan, budget check, poll, mark closing")
     pp.add_argument("--dry-run", action="store_true", help="free fixture calls only; spend nothing")
     pp.add_argument("--force", action="append", default=[], metavar="COMP", help="poll this competition now")
-    po.add_parser("close", help="mark closing prices for kicked-off events")
+    pcl = po.add_parser("close", help="mark closing prices for kicked-off events")
+    pcl.add_argument("--redo-since", metavar="YYYY-MM-DD",
+                     help="rebuild closes for events kicked off since this date (UTC); tracked CLV is recomputed on the next refresh")  # fmt: skip
     prd = po.add_parser("rederive", help="replay cached /odds responses through the O/U derivation (0 credits)")
     prd.add_argument("--date", help="YYYY-MM-DD cache folder (default: all)")
     prd.add_argument("--cache-dir", help="default: ingest.the_odds_api.cache_dir")

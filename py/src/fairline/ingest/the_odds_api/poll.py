@@ -3,7 +3,8 @@ the credit budget, poll, resolve teams/events, store snapshots, then mark closin
 
 Every paid call is an ingestion_run row (source 'the_odds_api', scope 'odds:<sport_key>') whose
 stats hold the credits it cost, the API's remaining balance, the poll time and which books priced
-which event. That row is both the credit ledger and the evidence a closing snapshot rests on.
+which event at which lines ("quoted": book|market|line keys, derived prices included). That row is
+both the credit ledger and the evidence a closing snapshot rests on.
 """
 
 from __future__ import annotations
@@ -35,6 +36,20 @@ def make_client(config: Config) -> OddsApiClient:
 
 def ou_lines(config: Config) -> set[float]:
     return {float(m.split("_", 1)[1]) for m in config.settings.markets["enabled"] if m.startswith("OU_")}
+
+
+def line_key(book: str, market: str, line) -> str:
+    """One quoted price set as `book|market|line`, '' for no line: 'pinnacle|OU|2.5', 'skybet|1X2|'.
+    Matches SQL `b.code || '|' || m.code || '|' || coalesce(trim_scale(m.line)::text, '')`."""
+    return f"{book}|{market}|{'' if line is None else f'{float(line):g}'}"
+
+
+def quoted_keys(rows: list[dict]) -> dict[str, list[str]]:
+    """event_id (as str) -> the line keys a poll actually priced, from its snapshot rows."""
+    out: dict[str, set[str]] = {}
+    for r in rows:
+        out.setdefault(str(r["event_id"]), set()).add(line_key(r["bookmaker"], r["market"], r["line"]))
+    return {k: sorted(v) for k, v in out.items()}
 
 
 # ---------------------------------------------------------------------- ledger
@@ -188,6 +203,7 @@ def poll_competition(
             if resp.cache_path.is_relative_to(config.root)
             else str(resp.cache_path),
             "events": {str(ext_to_event[x]): sorted(b) for x, b in parsed.books_seen.items() if x in ext_to_event},
+            "quoted": quoted_keys(rows),
             "snapshots": res.snapshots,
             "derived": res.derived,
             "derived_skipped": derived_skipped,
@@ -265,6 +281,37 @@ def sync_all(
 
 
 # ---------------------------------------------------------------------- replay (free)
+def _replay_file(conn: psycopg.Connection, config: Config, f: Path) -> tuple | None:
+    """Parse one cached /odds response and re-run the derivation on it: (competition, snapshot
+    rows with event_id, [Derived per target line]). None for a sport no longer polled."""
+    pair = D.config_for(config)
+    s = config.settings.odds_api
+    comp = {config.competition(c).provider_code(PROVIDER): c for c in s.competitions}.get(f.parent.parent.name)
+    if comp is None:
+        return None
+    rev = {v: k for k, v in config.provider_books(PROVIDER).items()}
+    meta = json.loads(f.with_name(f.name.replace(".json", ".meta.json")).read_text())
+    parsed = parse_odds(
+        json.loads(f.read_bytes()), rev, ou_lines(config), datetime.fromisoformat(meta["fetched_at"]),
+        pair[0] if pair else None,
+    )  # fmt: skip
+    ext_to_event = dict(
+        conn.execute(
+            "SELECT external_id, event_id FROM event_external_id WHERE provider = %s AND external_id = ANY(%s)",
+            (PROVIDER, [e.external_id for e in parsed.events]),
+        ).fetchall()
+    )
+    rows = [r | {"event_id": ext_to_event[r["external_id"]]} for r in parsed.rows if r["external_id"] in ext_to_event]
+    derived = []
+    if pair:
+        rho = D.latest_rho(conn, comp, s.derived_rho_default)
+        for target in sorted(ou_lines(config)):
+            derived.append(
+                (target, D.derive_totals(parsed, ext_to_event, pair[0], pair[1], target, rho, config.settings.edge.devig_method))
+            )  # fmt: skip
+    return comp, rows, derived
+
+
 def rederive_from_cache(conn: psycopg.Connection, config: Config, files: list[Path]) -> dict:
     """Re-run the O/U derivation over cached /odds responses (no API call, no credits). Each derived
     snapshot keeps the source prices' own last_update ts (capped at that poll's fetch time), so a
@@ -272,33 +319,14 @@ def rederive_from_cache(conn: psycopg.Connection, config: Config, files: list[Pa
     pair = D.config_for(config)
     if not pair:
         return {"files": 0}
-    books = config.provider_books(PROVIDER)
-    rev = {v: k for k, v in books.items()}
     sport_id = conn.execute("SELECT id FROM sport WHERE code = 'football'").fetchone()[0]
-    s = config.settings.odds_api
     out = {"files": 0, "derived": 0, "inserted": 0, "skipped": {}}
-    by_sport = {config.competition(c).provider_code(PROVIDER): c for c in s.competitions}
     for f in files:
-        meta = json.loads(f.with_name(f.name.replace(".json", ".meta.json")).read_text())
-        sport = f.parent.parent.name
-        comp = by_sport.get(sport)
-        if comp is None:
+        rep = _replay_file(conn, config, f)
+        if rep is None:
             continue
-        parsed = parse_odds(
-            json.loads(f.read_bytes()), rev, ou_lines(config), datetime.fromisoformat(meta["fetched_at"]), pair[0]
-        )
-        ext_to_event = dict(
-            conn.execute(
-                "SELECT external_id, event_id FROM event_external_id WHERE provider = %s AND external_id = ANY(%s)",
-                (PROVIDER, [e.external_id for e in parsed.events]),
-            ).fetchall()
-        )
-        rho = D.latest_rho(conn, comp, s.derived_rho_default)
         with conn.transaction():
-            for target in sorted(ou_lines(config)):
-                d = D.derive_totals(
-                    parsed, ext_to_event, pair[0], pair[1], target, rho, config.settings.edge.devig_method
-                )
+            for target, d in rep[2]:
                 D.store_records(conn, sport_id, pair[1], pair[0], target, d.records)
                 out["inserted"] += _insert_snapshots(conn, sport_id, d.rows)
                 out["derived"] += len(d.records)
@@ -309,12 +337,28 @@ def rederive_from_cache(conn: psycopg.Connection, config: Config, files: list[Pa
     return out
 
 
+def _poll_keys(conn: psycopg.Connection, config: Config, stats_quoted, cache: str | None, memo: dict) -> dict | None:
+    """The line keys a poll priced, per event. Polls from before `quoted` was recorded are rebuilt
+    from their cached response (and re-derived). None if neither is available."""
+    if stats_quoted is not None:
+        return stats_quoted
+    if not cache:
+        return None
+    if cache not in memo:
+        f = config.path(cache)
+        rep = _replay_file(conn, config, f) if f.exists() else None
+        memo[cache] = None if rep is None else quoted_keys(rep[1] + [r for _, d in rep[2] for r in d.rows])
+    return memo[cache]
+
+
 # ---------------------------------------------------------------------- closing
 def finalize_closing(conn: psycopg.Connection, config: Config, now: datetime, lookback_days: int = 7) -> dict:
     """For each kicked-off event with live odds and no live closing rows yet: if a poll landed in
     [kickoff - close_max_age, kickoff), copy each book's latest pre-kickoff price from that poll
-    as is_closing (ts = the poll time). Books absent from that poll get no closing price, and
-    an event with no qualifying poll gets none at all: a T-3h price is not a close."""
+    as is_closing (ts = the poll time). Only lines that poll actually priced are copied: a book that
+    moved its main line from 2.5 to 2.75 has no 2.5 close, even though its older 2.5 rows are the
+    latest ones on file. Books absent from that poll get no closing price, and an event with no
+    qualifying poll gets none at all: a T-3h price is not a close."""
     s = config.settings.odds_api
     max_age = timedelta(minutes=s.close_max_age_minutes)
     events = conn.execute(
@@ -326,34 +370,42 @@ def finalize_closing(conn: psycopg.Connection, config: Config, now: datetime, lo
         """,
         (now, now - timedelta(days=lookback_days), PROVIDER, PROVIDER),
     ).fetchall()
-    out = {"closed": 0, "no_close_poll": 0, "rows": 0}
+    out = {"closed": 0, "no_close_poll": 0, "no_quote_record": 0, "rows": 0}
+    memo: dict = {}
     for eid, kickoff in events:
         run = conn.execute(
             """
-            SELECT (stats->>'polled_at')::timestamptz, stats->'events'->%s FROM ingestion_run
+            SELECT (stats->>'polled_at')::timestamptz, stats->'quoted', stats->>'cache' FROM ingestion_run
             WHERE source = %s AND status = 'ok' AND stats->'events' ? %s
               AND (stats->>'polled_at')::timestamptz >= %s AND (stats->>'polled_at')::timestamptz < %s
             ORDER BY (stats->>'polled_at')::timestamptz DESC LIMIT 1
             """,
-            (str(eid), PROVIDER, str(eid), kickoff - max_age, kickoff),
+            (PROVIDER, str(eid), kickoff - max_age, kickoff),
         ).fetchone()
         if run is None:
             out["no_close_poll"] += 1
             continue
-        polled_at, books = run
+        polled_at, quoted, cache = run
+        per_event = _poll_keys(conn, config, quoted, cache, memo)
+        if per_event is None:
+            out["no_quote_record"] += 1
+            log.warning("event %s: close poll at %s has no record of which lines it priced; no close", eid, polled_at)
+            continue
+        keys = per_event.get(str(eid), [])
         cur = conn.execute(
             """
             INSERT INTO odds_snapshot (ts, ts_estimated, event_id, market_id, bookmaker_id, selection, price, is_closing, source)
             SELECT %s, false, o.event_id, o.market_id, o.bookmaker_id, o.selection, o.price, true, %s
             FROM (
               SELECT DISTINCT ON (o.market_id, o.bookmaker_id, o.selection) o.*
-              FROM odds_snapshot o JOIN bookmaker b ON b.id = o.bookmaker_id
-              WHERE o.event_id = %s AND o.source = %s AND NOT o.is_closing AND o.ts <= %s AND b.code = ANY(%s)
+              FROM odds_snapshot o JOIN bookmaker b ON b.id = o.bookmaker_id JOIN market m ON m.id = o.market_id
+              WHERE o.event_id = %s AND o.source = %s AND NOT o.is_closing AND o.ts <= %s
+                AND b.code || '|' || m.code || '|' || coalesce(trim_scale(m.line)::text, '') = ANY(%s)
               ORDER BY o.market_id, o.bookmaker_id, o.selection, o.ts DESC
             ) o
             ON CONFLICT DO NOTHING
             """,
-            (polled_at, PROVIDER, eid, PROVIDER, polled_at, list(books or [])),
+            (polled_at, PROVIDER, eid, PROVIDER, polled_at, keys),
         )
         conn.execute(
             """
@@ -362,17 +414,44 @@ def finalize_closing(conn: psycopg.Connection, config: Config, now: datetime, lo
             SELECT DISTINCT ON (d.bookmaker_id, d.market_id) d.event_id, d.bookmaker_id, true, %s, d.market_id,
                    d.source_book_id, d.source_line, d.source_over, d.source_under, d.lambda_home, d.lambda_away, d.rho,
                    d.p_over, d.draw_fit_error, d.method
-            FROM odds_derivation d JOIN bookmaker b ON b.id = d.bookmaker_id
-            WHERE d.event_id = %s AND NOT d.is_closing AND d.ts <= %s AND b.code = ANY(%s)
+            FROM odds_derivation d JOIN bookmaker b ON b.id = d.bookmaker_id JOIN market m ON m.id = d.market_id
+            WHERE d.event_id = %s AND NOT d.is_closing AND d.ts <= %s
+              AND b.code || '|' || m.code || '|' || coalesce(trim_scale(m.line)::text, '') = ANY(%s)
             ORDER BY d.bookmaker_id, d.market_id, d.ts DESC
             ON CONFLICT DO NOTHING
             """,
-            (polled_at, eid, polled_at, list(books or [])),
+            (polled_at, eid, polled_at, keys),
         )
         out["closed"] += 1
         out["rows"] += cur.rowcount
     conn.commit()
     return out
+
+
+def reclose(conn: psycopg.Connection, config: Config, since: datetime, now: datetime) -> dict:
+    """Rebuild the live closing rows of events kicked off in [since, now], e.g. after a fix to how
+    closes are chosen. Tracked legs on those events lose their close and CLV, so the next tracker
+    refresh recomputes them against the rebuilt close. Free: uses stored rows and cached responses."""
+    ids = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT o.event_id FROM odds_snapshot o JOIN event e ON e.id = o.event_id "
+            "WHERE o.is_closing AND o.source = %s AND e.starts_at >= %s AND e.starts_at <= %s",
+            (PROVIDER, since, now),
+        ).fetchall()
+    ]
+    with conn.transaction():
+        conn.execute(
+            "DELETE FROM odds_snapshot WHERE is_closing AND source = %s AND event_id = ANY(%s)", (PROVIDER, ids)
+        )
+        conn.execute("DELETE FROM odds_derivation WHERE is_closing AND event_id = ANY(%s)", (ids,))
+        legs = conn.execute(
+            "UPDATE tracked_bet_leg SET close_book = NULL, close_fair_prob = NULL, clv = NULL, close_source_line = NULL, "
+            "clv_note = NULL WHERE event_id = ANY(%s)",
+            (ids,),
+        ).rowcount
+    out = finalize_closing(conn, config, now, lookback_days=max(7, (now - since).days + 1))
+    return {"events": len(ids), "legs_reset": legs} | out
 
 
 # ---------------------------------------------------------------------- tick
