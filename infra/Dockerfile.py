@@ -4,6 +4,9 @@ COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/opt/venv \
     PATH="/opt/venv/bin:$PATH" DAGSTER_HOME=/dagster_home FAIRLINE_ROOT=/app
 
+# PyMC/PyTensor compiles C at runtime; without a compiler it silently falls back to slow Python mode.
+RUN apt-get update && apt-get install -y --no-install-recommends g++ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY py/pyproject.toml py/uv.lock py/
 RUN cd py && uv sync --frozen --no-dev --no-install-project

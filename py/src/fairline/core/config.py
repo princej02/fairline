@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def repo_root() -> Path:
@@ -51,8 +51,9 @@ class Bookmaker(BaseModel):
 
     code: str
     name: str
-    kind: Literal["book", "exchange", "aggregate"]
+    kind: Literal["book", "exchange", "aggregate", "derived"]
     is_sharp: bool
+    derived_from: str | None = None  # kind 'derived': the real book its prices are computed from
     providers: dict[str, str | None] = Field(default_factory=dict)
 
 
@@ -61,9 +62,24 @@ class EdgeSettings(BaseModel):
     max_stake_pct: float = Field(gt=0, le=1)
     min_ev: float
     max_odds: float = Field(gt=1)
-    devig_method: Literal["multiplicative", "power", "shin"]
+    devig_method: Literal["multiplicative", "additive", "power", "shin"]
     reference_books: list[str]
+    bettable_books: list[str]
     betfair_commission: float = Field(ge=0, lt=1)
+    max_match_exposure_pct: float = Field(gt=0, le=1)
+    max_slate_exposure_pct: float = Field(gt=0, le=1)
+    one_per_match: bool
+    disagreement_warn: float = Field(gt=0, lt=1)
+    conservative_quantile: float = Field(gt=0, lt=0.5)
+    acca_max_legs: int = Field(ge=2)
+    acca_max_combined_odds: float = Field(gt=1)
+    # reference book -> its derived pseudo-book (pinnacle -> pinnacle_derived). Filled from
+    # bookmakers.yaml at load. Live board and tracker treat each pair as one source and use the
+    # fresher snapshot; the backtester never loads derived books, so history cannot mix them.
+    derived_references: dict[str, str] = Field(default_factory=dict)
+
+    def live_quote_books(self) -> list[str]:
+        return sorted(set(self.reference_books) | set(self.bettable_books) | set(self.derived_references.values()))
 
 
 class FootballDataCoUkSettings(BaseModel):
@@ -75,16 +91,85 @@ class FootballDataCoUkSettings(BaseModel):
     cache_dir: str
 
 
+class TheOddsApiSettings(BaseModel):
+    base_url: str
+    markets: str
+    competitions: list[str]
+    monthly_credit_budget: int = Field(gt=0)
+    reserve_credits: int = Field(ge=0)
+    burst_days: float = Field(ge=0, le=31)
+    warn_at: float = Field(gt=0, le=1)
+    poll_windows_hours: list[float]
+    window_tolerance_share: float = Field(ge=0, lt=1)
+    close_window_minutes: float = Field(gt=0)
+    close_max_age_minutes: float = Field(gt=0)
+    events_refresh_hours: float = Field(gt=0)
+    tick_minutes: float = Field(gt=0)
+    cache_dir: str
+    derived_rho_default: float = Field(default=-0.03, ge=-0.3, le=0.3)  # when a league has no model fit yet
+
+    @model_validator(mode="after")
+    def _close_after_window(self):
+        if self.close_max_age_minutes < self.close_window_minutes + self.tick_minutes:
+            raise ValueError("close_max_age_minutes must cover close_window_minutes + one tick")
+        return self
+
+
+class DixonColesSettings(BaseModel):
+    max_goals: int = Field(ge=10, description="grid must cover at least 0-10 goals per side")
+    half_life_days: float = Field(gt=0)
+    max_history_days: int = Field(gt=0)
+    prior_sd: float = Field(gt=0)
+    rho_bounds: tuple[float, float]
+    result_delay_hours: float = Field(ge=0)
+    cold_start: Literal["pooled", "prior"]
+    min_effective_matches: float = Field(ge=0)
+    promoted_prior_quantile: float = Field(gt=0, lt=1)
+    pools: dict[str, list[str]]
+
+
+class WalkForwardSettings(BaseModel):
+    burn_in_days: int = Field(ge=0)
+    retrain_every_days: int = Field(gt=0)
+    live_horizon_hours: float = Field(default=72, ge=0)  # live scoring: fit at now, score kickoffs up to now + this
+
+
+class BayesSettings(BaseModel):
+    history_days: int = Field(gt=0)
+    draws: int = Field(gt=0)
+    tune: int = Field(gt=0)
+    chains: int = Field(gt=0)
+    interval: float = Field(gt=0, lt=1)
+    target_accept: float = Field(gt=0.5, lt=1)
+
+
+class ModelSettings(BaseModel):
+    dixon_coles: DixonColesSettings
+    walkforward: WalkForwardSettings
+    bayes: BayesSettings
+
+
+class TrackerSettings(BaseModel):
+    bankroll: float = Field(gt=0)
+    currency: str
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     edge: EdgeSettings
     markets: dict[str, Any]
     ingest: dict[str, Any]
+    models: ModelSettings
+    tracker: TrackerSettings
 
     @property
     def fdcuk(self) -> FootballDataCoUkSettings:
         return FootballDataCoUkSettings(**self.ingest["football_data_co_uk"])
+
+    @property
+    def odds_api(self) -> TheOddsApiSettings:
+        return TheOddsApiSettings(**self.ingest["the_odds_api"])
 
 
 _SEASON_RE = re.compile(r"^(\d{4})-(\d{2})$")
@@ -102,6 +187,12 @@ def season_range(first: str, last: str) -> list[str]:
     return [f"{y}-{(y + 1) % 100:02d}" for y in range(a, b + 1)]
 
 
+def season_label_for(d) -> str:
+    """European football season of a date: July-June. date(2026, 8, 1) -> '2026-27'."""
+    y = d.year if d.month >= 7 else d.year - 1
+    return f"{y}-{(y + 1) % 100:02d}"
+
+
 class Config(BaseModel):
     root: Path
     settings: Settings
@@ -113,6 +204,19 @@ class Config(BaseModel):
             return self.competitions[code]
         except KeyError:
             raise NotAllowed(f"competition {code!r} is not in the allowlist (config/competitions.yaml)") from None
+
+    def derived_of(self, book: str) -> str | None:
+        """The derived pseudo-book computed from `book` (pinnacle -> pinnacle_derived), if any."""
+        return next((c for c, b in self.bookmakers.items() if b.derived_from == book), None)
+
+    def provider_books(self, provider: str) -> dict[str, str]:
+        """Our code -> the provider's key, for books that provider actually carries. A null mapping
+        (e.g. Bet365 on The Odds API) means historical-only: never request it, never expect rows."""
+        return {
+            code: key
+            for code, b in self.bookmakers.items()
+            if b.kind in ("book", "exchange") and (key := b.providers.get(provider))
+        }
 
     def competitions_for(self, provider: str, sport: str = "football") -> list[Competition]:
         return [c for c in self.competitions.values() if c.sport == sport and c.providers.get(provider)]
@@ -139,10 +243,31 @@ def load_config(root: Path | None = None) -> Config:
     books_raw = yaml.safe_load((cfg_dir / "bookmakers.yaml").read_text())
     bookmakers = {b["code"]: Bookmaker(**b) for b in books_raw["bookmakers"]}
 
-    unknown = set(settings.edge.reference_books) - bookmakers.keys()
+    unknown = (set(settings.edge.reference_books) | set(settings.edge.bettable_books)) - bookmakers.keys()
     if unknown:
-        raise ValueError(f"edge.reference_books references unknown bookmakers: {sorted(unknown)}")
+        raise ValueError(f"edge reference/bettable books reference unknown bookmakers: {sorted(unknown)}")
+    for code, b in bookmakers.items():
+        if (b.kind == "derived") != (b.derived_from is not None) or (
+            b.derived_from and b.derived_from not in bookmakers
+        ):
+            raise ValueError(f"bookmaker {code}: kind 'derived' needs derived_from naming a real bookmaker")
+    if set(settings.edge.bettable_books) & {c for c, b in bookmakers.items() if b.kind == "derived"}:
+        raise ValueError("a derived price can be a reference, never a bettable book")
+    for pool, codes in settings.models.dixon_coles.pools.items():
+        bad = [c for c in codes if c not in competitions]
+        if bad:
+            raise ValueError(f"models.dixon_coles.pools.{pool} references non-allowlisted competitions: {bad}")
+    if "the_odds_api" in settings.ingest:
+        for code in settings.odds_api.competitions:
+            if code not in competitions:
+                raise ValueError(f"ingest.the_odds_api.competitions: {code!r} is not allowlisted")
+            competitions[code].provider_code("the_odds_api")  # raises NotAllowed if unmapped
 
+    settings.edge.derived_references = {
+        b.derived_from: c
+        for c, b in bookmakers.items()
+        if b.kind == "derived" and b.derived_from in settings.edge.reference_books
+    }
     return Config(root=root, settings=settings, competitions=competitions, bookmakers=bookmakers)
 
 
